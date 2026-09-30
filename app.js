@@ -44,6 +44,8 @@ const data = {
   ]
 };
 
+let planningMode = "Conservative";
+
 function icon(name){return ICONS[name]||ICONS.note}
 function isLandscape(){return matchMedia("(orientation: landscape) and (max-height: 720px)").matches}
 function nowText(){return new Intl.DateTimeFormat(undefined,{hour:"numeric",minute:"2-digit"}).format(new Date())}
@@ -88,7 +90,17 @@ function split(left,right,cls=""){return `<div class="landscape-split ${cls}"><d
 function home(){
   const [g,title,sub]=greeting();
   const hero=`<section class="home-hero">
-    <div class="hero-top"><div><span class="eyebrow">${g}</span><h1>${title}</h1><p>${sub}</p></div><span class="now-chip">NOW · ${nowText()}</span></div>
+    <div class="hero-top">
+      <div><span class="eyebrow">${g}</span><h1>${title}</h1><p>${sub}</p></div>
+      <div class="hero-status-stack">
+        <span class="now-chip">NOW · ${nowText()}</span>
+        <button class="hero-mode-chip" id="heroModeButton" type="button" aria-label="Planning mode">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.7 2.9 8.2 7 10 4.1-1.8 7-5.3 7-10V6l-7-3Z"/><path d="m9.2 12 1.8 1.8 3.8-4"/></svg>
+          <span>${planningMode}</span>
+          <b>⌄</b>
+        </button>
+      </div>
+    </div>
     <div class="intel-grid">
       <button class="intel-card" data-route="today"><span class="intel-icon">${icon("clock")}</span><span class="intel-copy"><small>NEXT</small><strong>17:30</strong><em>Patient consultation</em></span><span class="chev">›</span></button>
       <button class="intel-card attention" data-route="tasks"><span class="intel-icon">${icon("alert")}</span><span class="intel-copy"><small>ATTENTION</small><strong>2 clashes</strong><em>Resolve before they affect the day.</em></span><span class="chev">›</span></button>
@@ -242,6 +254,17 @@ function bindDynamic(){
   document.querySelectorAll(".toggle").forEach(el=>el.addEventListener("click",e=>{
     e.preventDefault();e.stopPropagation();el.classList.toggle("on");
   }));
+
+  const heroModeButton=document.getElementById("heroModeButton");
+  if(heroModeButton){
+    heroModeButton.addEventListener("click",()=>{
+      const modes=["Conservative","Assisted","Autonomous"];
+      planningMode=modes[(modes.indexOf(planningMode)+1)%modes.length];
+      const label=heroModeButton.querySelector("span");
+      if(label)label.textContent=planningMode;
+      toast("Planning mode: "+planningMode);
+    });
+  }
 }
 function toast(msg){
   const t=document.getElementById("toast");t.textContent=msg;t.classList.add("show");
@@ -250,12 +273,6 @@ function toast(msg){
 
 document.querySelectorAll(".brand,.top-actions [data-route],.bottom-nav [data-route]").forEach(el=>{
   el.addEventListener("click",()=>render(el.dataset.route));
-});
-document.getElementById("modeButton").addEventListener("click",()=>{
-  const span=document.querySelector("#modeButton span");
-  const modes=["Conservative","Assisted","Autonomous"];
-  span.textContent=modes[(modes.indexOf(span.textContent)+1)%modes.length];
-  toast("Planning mode: "+span.textContent);
 });
 window.addEventListener("popstate",()=>render(location.hash.replace("#","")||"home",true));
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>render(location.hash.replace("#","")||"home",true));

@@ -41,9 +41,9 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
 .brand{border:0;background:transparent;padding:0;display:grid;grid-template-columns:48px minmax(0,1fr);gap:11px;align-items:center;text-align:left;color:var(--navy);min-width:0}
 .brand img{width:48px;height:48px;object-fit:contain}
 .brand span{min-width:0}
-.brand strong{display:block;font-size:27px;line-height:1;font-weight:850;letter-spacing:-.03em}
-.brand small{display:block;margin-top:4px;font-size:14px;line-height:1.15;font-weight:650;color:var(--slate);white-space:nowrap}
-.top-actions{display:flex;align-items:center;gap:8px}
+.brand strong{display:block;font-size:27px;line-height:1;font-weight:850;letter-spacing:-.03em;white-space:nowrap}
+.brand small{display:block;margin-top:6px;font-size:14px;line-height:1.15;font-weight:650;color:var(--slate);white-space:nowrap}
+.top-actions{display:flex;align-items:center;justify-content:flex-end;gap:0}
 .mode-chip,.icon-button{
   height:48px;border-radius:16px;border:1px solid var(--line);background:#fff;display:flex;align-items:center;justify-content:center;
 }
@@ -102,7 +102,20 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
 .home-hero .eyebrow{color:rgba(255,255,255,.8)}
 .home-hero h1{font-size:41px;line-height:1;letter-spacing:-.045em;margin:58px 0 8px;max-width:12ch}
 .home-hero p{font-size:17px;line-height:1.42;margin:0;max-width:34ch;color:rgba(255,255,255,.91)}
+
 .now-chip{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:7px 10px;font-size:13px;font-weight:850;white-space:nowrap}
+.hero-status-stack{display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex:0 0 auto}
+.hero-mode-chip{
+  min-height:46px;min-width:148px;padding:0 11px;border-radius:15px;
+  border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.13);
+  color:#fff;display:flex;align-items:center;justify-content:center;gap:7px;
+  font-weight:800;backdrop-filter:blur(8px);
+}
+.hero-mode-chip svg{width:18px;height:18px;flex:0 0 auto}
+.hero-mode-chip span{font-size:14px;white-space:nowrap}
+.hero-mode-chip b{font-size:15px;line-height:1;font-weight:700;color:rgba(255,255,255,.82)}
+.hero-mode-chip:active{transform:scale(.98)}
+
 .intel-grid{position:relative;z-index:2;display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:32px}
 .intel-card{
   min-height:128px;border:1px solid rgba(255,255,255,.27);border-radius:20px;background:rgba(255,255,255,.13);padding:13px;
@@ -265,8 +278,8 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
   .topbar{height:64px;padding:7px 18px}
   .brand{grid-template-columns:38px 1fr;gap:9px}
   .brand img{width:38px;height:38px}
-  .brand strong{font-size:22px}
-  .brand small{font-size:12.5px}
+  .brand strong{font-size:22px;white-space:nowrap}
+  .brand small{font-size:12.5px;white-space:nowrap}
   .mode-chip,.icon-button{height:44px}
   .mode-chip{min-width:136px}
   .app-main{padding-bottom:calc(var(--nav-h) + env(safe-area-inset-bottom))}
@@ -287,6 +300,9 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
   .home-landscape .home-hero{height:100%;min-height:0;padding:20px 22px}
   .home-landscape .home-hero h1{font-size:43px;margin-top:50px}
   .home-landscape .home-hero p{font-size:16px}
+  .home-landscape .hero-status-stack{gap:6px}
+  .home-landscape .hero-mode-chip{min-height:42px;min-width:140px;padding:0 10px}
+  .home-landscape .hero-mode-chip span{font-size:13px}
   .home-landscape .intel-grid{grid-template-columns:1fr;margin-top:24px}
   .home-landscape .intel-card{min-height:100px}
   .home-landscape .section{height:100%;overflow:auto;padding:18px 20px 24px;background:#fff}
@@ -306,4 +322,16 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
   .action-list{grid-template-columns:1fr 1fr}
   .action-row:last-child:nth-child(odd){grid-column:1/-1}
   .more-grid{grid-template-columns:repeat(3,1fr)}
+}
+
+
+/* Mobile 5.2 - header-only safeguard */
+@media (max-width:390px) and (orientation:portrait){
+  .topbar{padding-left:12px;padding-right:12px;gap:8px}
+  .brand{grid-template-columns:44px minmax(0,1fr);gap:9px}
+  .brand img{width:44px;height:44px}
+  .brand strong{font-size:25px;white-space:nowrap}
+  .brand small{font-size:12.5px;white-space:nowrap;margin-top:5px}
+  .icon-button{width:46px;height:46px}
+  .hero-mode-chip{min-width:142px}
 }
