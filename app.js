@@ -102,8 +102,20 @@ function home(){
       </div>
     </div>
     <div class="intel-grid">
-      <button class="intel-card" data-route="today"><span class="intel-icon">${icon("clock")}</span><span class="intel-copy"><small>NEXT</small><strong>17:30</strong><em>Patient consultation</em></span><span class="chev">›</span></button>
-      <button class="intel-card attention" data-route="tasks"><span class="intel-icon">${icon("alert")}</span><span class="intel-copy"><small>ATTENTION</small><strong>2 clashes</strong><em>Resolve before they affect the day.</em></span><span class="chev">›</span></button>
+      <button class="intel-card" data-route="today" aria-label="Next: 17:30 Patient consultation">
+        <span class="intel-copy">
+          <small>NEXT</small>
+          <strong>17:30</strong>
+          <em>Patient consultation</em>
+        </span>
+      </button>
+      <button class="intel-card attention" data-route="tasks" aria-label="Attention: 2 schedule clashes">
+        <span class="intel-copy">
+          <small>ATTENTION</small>
+          <strong>2 clashes</strong>
+          <em>Schedule conflicts</em>
+        </span>
+      </button>
     </div>
   </section>`;
   const context=`<section class="section white"><div class="section-head"><div><span class="kicker">NOW</span><h2>What matters now</h2></div></div><div class="action-list">
