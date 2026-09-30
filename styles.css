@@ -116,8 +116,22 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
 .hero-mode-chip b{font-size:15px;line-height:1;font-weight:700;color:rgba(255,255,255,.82)}
 .hero-mode-chip:active{transform:scale(.98)}
 
-.intel-grid{position:relative;z-index:2;display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:32px}
+.intel-grid{
+  position:relative;
+  z-index:2;
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:10px;
+  width:calc(100% - 8px);
+  margin:32px auto 0;
+  padding:0;
+  min-width:0;
+}
 .intel-card{
+  min-width:0;
+  width:100%;
+  max-width:100%;
+  overflow:hidden;
   min-height:132px;
   border:1px solid rgba(255,255,255,.30);
   border-radius:22px;
@@ -144,7 +158,9 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
 }
 .intel-copy{
   min-width:0;
+  max-width:100%;
   width:100%;
+  overflow:hidden;
   display:flex;
   flex-direction:column;
   justify-content:flex-end;
@@ -161,6 +177,7 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
 }
 .intel-copy strong{
   display:block;
+  max-width:100%;
   font-size:30px;
   line-height:1;
   letter-spacing:-.03em;
@@ -427,4 +444,64 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
   .page{min-height:calc(100dvh - var(--header-h) - var(--nav-h));height:auto;overflow:visible}
   .topbar{position:sticky;top:0}
   .bottom-nav{position:fixed}
+}
+
+
+/* Mobile 5.4 - Hero intelligence card fit guarantee */
+@media (max-width:430px) and (orientation:portrait){
+  .home-hero{
+    padding-left:14px;
+    padding-right:14px;
+  }
+  .intel-grid{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    width:calc(100% - 4px);
+    gap:8px;
+    margin-left:auto;
+    margin-right:auto;
+  }
+  .intel-card{
+    min-width:0;
+    width:100%;
+    max-width:100%;
+    padding:17px 15px 16px;
+  }
+  .intel-copy small{
+    font-size:12.5px;
+    margin-bottom:12px;
+  }
+  .intel-copy strong{
+    font-size:28px;
+    line-height:1;
+    white-space:nowrap;
+  }
+  .intel-copy em{
+    font-size:14px;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+}
+
+@media (max-width:360px) and (orientation:portrait){
+  .intel-grid{gap:7px;width:100%}
+  .intel-card{padding-left:13px;padding-right:13px}
+  .intel-copy strong{font-size:26px}
+  .intel-copy em{font-size:13.5px}
+}
+
+/* Landscape cards also keep a thin, deliberate outer margin. */
+@media (orientation:landscape) and (max-height:720px){
+  .home-landscape .intel-grid{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    width:calc(100% - 8px);
+    margin-left:auto;
+    margin-right:auto;
+    gap:9px;
+  }
+  .home-landscape .intel-card{
+    min-width:0;
+    width:100%;
+    max-width:100%;
+  }
 }
