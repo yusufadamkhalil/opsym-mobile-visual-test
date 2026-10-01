@@ -46,6 +46,144 @@ const data = {
 
 let planningMode = "Conservative";
 
+/* -------------------------------------------------------
+   Mobile Backend Integration v1.0 - HOME ONLY
+   UI remains frozen. No write actions are enabled.
+-------------------------------------------------------- */
+let liveHomeData = null;
+let liveHomeLoaded = false;
+let liveHomeError = null;
+
+const mobileBridge = {
+  endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
+  key: localStorage.getItem("opsym_mobile_bridge_key") || ""
+};
+
+function escapeHtml(value){
+  return String(value == null ? "" : value)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+}
+
+function currentRoute(){
+  return location.hash.replace("#","") || "home";
+}
+
+function saveMobileBridgeConfig(endpoint,key){
+  const clean=String(endpoint||"").trim().replace(/\/$/,"");
+  const secret=String(key||"").trim();
+  if(!/^https:\/\/script\.google\.com\/macros\/s\/.+\/(exec|dev)$/.test(clean)){
+    throw new Error("Use the complete Apps Script Web App URL ending in /exec or /dev.");
+  }
+  if(secret.length < 32) throw new Error("The access key does not look complete.");
+  localStorage.setItem("opsym_mobile_bridge_url",clean);
+  localStorage.setItem("opsym_mobile_bridge_key",secret);
+  mobileBridge.endpoint=clean;
+  mobileBridge.key=secret;
+}
+
+function clearMobileBridgeConfig(){
+  localStorage.removeItem("opsym_mobile_bridge_url");
+  localStorage.removeItem("opsym_mobile_bridge_key");
+  mobileBridge.endpoint="";
+  mobileBridge.key="";
+  liveHomeData=null;
+  liveHomeLoaded=false;
+}
+
+function jsonpRequest(url,params,timeoutMs=9000){
+  return new Promise((resolve,reject)=>{
+    const cb="__opsym_cb_"+Date.now()+"_"+Math.random().toString(36).slice(2);
+    const script=document.createElement("script");
+    let finished=false;
+    const timer=setTimeout(()=>finish(new Error("Home data request timed out.")),timeoutMs);
+
+    function finish(err,value){
+      if(finished)return;
+      finished=true;
+      clearTimeout(timer);
+      try{delete window[cb]}catch(_){window[cb]=undefined}
+      script.remove();
+      err?reject(err):resolve(value);
+    }
+
+    window[cb]=payload=>finish(null,payload);
+    const q=new URLSearchParams({...params,callback:cb,_:Date.now().toString()});
+    script.src=url+"?"+q.toString();
+    script.async=true;
+    script.referrerPolicy="no-referrer";
+    script.onerror=()=>finish(new Error("Could not reach the Op-Sym Mobile Bridge."));
+    document.head.appendChild(script);
+  });
+}
+
+async function loadLiveHomeData(showFailureToast=false){
+  if(!mobileBridge.endpoint || !mobileBridge.key) return false;
+  try{
+    const payload=await jsonpRequest(mobileBridge.endpoint,{
+      action:"home",
+      key:mobileBridge.key
+    });
+    if(!payload || payload.ok!==true) throw new Error(payload?.error || "Invalid Home response.");
+    liveHomeData=payload.data || null;
+    liveHomeLoaded=!!liveHomeData;
+    liveHomeError=null;
+    if(liveHomeData?.planningMode) planningMode=liveHomeData.planningMode;
+    if(currentRoute()==="home") render("home",true);
+    return true;
+  }catch(err){
+    liveHomeError=err;
+    liveHomeLoaded=false;
+    if(showFailureToast) toast("Home data unavailable - using frozen demo view");
+    return false;
+  }
+}
+
+function homeActionIcon(kind){
+  return ({
+    clash:"shuffle",
+    overdue:"alert",
+    unscheduled:"clock",
+    risk:"alert",
+    inbox:"inbox",
+    today:"calendar",
+    clear:"target"
+  })[kind] || "task";
+}
+
+function runBackendSetupFromQuery(){
+  const p=new URLSearchParams(location.search);
+  if(p.get("resetapi")==="1"){
+    clearMobileBridgeConfig();
+    history.replaceState({},"",location.pathname+location.hash);
+    setTimeout(()=>alert("Op-Sym Mobile Bridge settings were removed from this phone."),50);
+    return;
+  }
+  if(p.get("setup")!=="1") return;
+
+  setTimeout(async()=>{
+    const endpoint=prompt(
+      "Op-Sym Mobile Bridge setup\n\nPaste the Apps Script Web App URL ending in /exec:",
+      mobileBridge.endpoint || ""
+    );
+    if(endpoint===null)return;
+    const key=prompt(
+      "Paste the private Mobile Bridge access key.\n\nIt is stored only on this device and is never uploaded to GitHub:",
+      ""
+    );
+    if(key===null)return;
+    try{
+      saveMobileBridgeConfig(endpoint,key);
+      history.replaceState({},"",location.pathname+"#home");
+      const ok=await loadLiveHomeData(false);
+      alert(ok ? "Connected. The Home screen is now reading live Op-Sym data." :
+                 "Settings saved, but the first live-data test failed. Check the bridge deployment and key.");
+    }catch(err){
+      alert("Setup was not saved:\n"+err.message);
+    }
+  },120);
+}
+
 function icon(name){return ICONS[name]||ICONS.note}
 function isLandscape(){return matchMedia("(orientation: landscape) and (max-height: 720px)").matches}
 function nowText(){return new Intl.DateTimeFormat(undefined,{hour:"numeric",minute:"2-digit"}).format(new Date())}
@@ -89,6 +227,13 @@ function split(left,right,cls=""){return `<div class="landscape-split ${cls}"><d
 
 function home(){
   const [g,title,sub]=greeting();
+  const hd=liveHomeData;
+
+  const nextTime=escapeHtml(hd?.next?.time || "17:30");
+  const nextTitle=escapeHtml(hd?.next?.title || "Patient consultation");
+  const attentionPrimary=escapeHtml(hd?.attention?.primary || "2 clashes");
+  const attentionSecondary=escapeHtml(hd?.attention?.secondary || "Schedule conflicts");
+
   const hero=`<section class="home-hero">
     <div class="hero-top">
       <div><span class="eyebrow">${g}</span><h1>${title}</h1><p>${sub}</p></div>
@@ -96,32 +241,44 @@ function home(){
         <span class="now-chip">NOW · ${nowText()}</span>
         <button class="hero-mode-chip" id="heroModeButton" type="button" aria-label="Planning mode">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.7 2.9 8.2 7 10 4.1-1.8 7-5.3 7-10V6l-7-3Z"/><path d="m9.2 12 1.8 1.8 3.8-4"/></svg>
-          <span>${planningMode}</span>
+          <span>${escapeHtml(planningMode)}</span>
           <b>⌄</b>
         </button>
       </div>
     </div>
     <div class="intel-grid">
-      <button class="intel-card" data-route="today" aria-label="Next: 17:30 Patient consultation">
+      <button class="intel-card" data-route="today" aria-label="Next: ${nextTime} ${nextTitle}">
         <span class="intel-copy">
           <small>NEXT</small>
-          <strong>17:30</strong>
-          <em>Patient consultation</em>
+          <strong>${nextTime}</strong>
+          <em>${nextTitle}</em>
         </span>
       </button>
-      <button class="intel-card attention" data-route="tasks" aria-label="Attention: 2 schedule clashes">
+      <button class="intel-card attention" data-route="tasks" aria-label="Attention: ${attentionPrimary}">
         <span class="intel-copy">
           <small>ATTENTION</small>
-          <strong>2 clashes</strong>
-          <em>Schedule conflicts</em>
+          <strong>${attentionPrimary}</strong>
+          <em>${attentionSecondary}</em>
         </span>
       </button>
     </div>
   </section>`;
+
+  const defaultMatters=[
+    {kind:"clash",title:"Resolve 2 schedule clashes",subtitle:"Protect the next commitment before pressure becomes disruptive.",warn:true,route:"tasks"},
+    {kind:"unscheduled",title:"3 unscheduled tasks",subtitle:"Place the most important open work into a realistic time.",warn:false,route:"tasks"},
+    {kind:"inbox",title:"Review 3 Inbox items",subtitle:"Clarify captured work while the context is still fresh.",warn:false,route:"inbox"}
+  ];
+  const matters=(hd?.matters?.length ? hd.matters : defaultMatters).slice(0,3);
+
   const context=`<section class="section white"><div class="section-head"><div><span class="kicker">NOW</span><h2>What matters now</h2></div></div><div class="action-list">
-    ${actionRow("shuffle","Resolve 2 schedule clashes","Protect the next commitment before pressure becomes disruptive.",true,"tasks")}
-    ${actionRow("clock","3 unscheduled tasks","Place the most important open work into a realistic time.",false,"tasks")}
-    ${actionRow("inbox","Review 3 Inbox items","Clarify captured work while the context is still fresh.",false,"inbox")}
+    ${matters.map(item=>actionRow(
+      homeActionIcon(item.kind),
+      escapeHtml(item.title),
+      escapeHtml(item.subtitle),
+      !!item.warn,
+      item.route || "tasks"
+    )).join("")}
   </div></section>`;
   return `<section class="page">${isLandscape()?`<div class="home-landscape">${hero}${context}</div>`:hero+context}</section>`;
 }
@@ -289,4 +446,15 @@ document.querySelectorAll(".brand,.top-actions [data-route],.bottom-nav [data-ro
 window.addEventListener("popstate",()=>render(location.hash.replace("#","")||"home",true));
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>render(location.hash.replace("#","")||"home",true));
 
+runBackendSetupFromQuery();
 render(location.hash.replace("#","")||"home",true);
+loadLiveHomeData(false);
+
+// Refresh live Home data when returning to the app after 60 seconds or more.
+let __lastHomeRefresh=Date.now();
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="visible" && Date.now()-__lastHomeRefresh>60000){
+    __lastHomeRefresh=Date.now();
+    loadLiveHomeData(false);
+  }
+});
