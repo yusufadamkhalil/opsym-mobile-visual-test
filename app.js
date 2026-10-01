@@ -54,6 +54,10 @@ let liveHomeData = null;
 let liveHomeLoaded = false;
 let liveHomeError = null;
 
+let liveTodayData = null;
+let liveTodayLoaded = false;
+let liveTodayError = null;
+
 const mobileBridge = {
   endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
   key: localStorage.getItem("opsym_mobile_bridge_key") || ""
@@ -89,6 +93,8 @@ function clearMobileBridgeConfig(){
   mobileBridge.key="";
   liveHomeData=null;
   liveHomeLoaded=false;
+  liveTodayData=null;
+  liveTodayLoaded=false;
 }
 
 function jsonpRequest(url,params,timeoutMs=9000){
@@ -139,6 +145,27 @@ async function loadLiveHomeData(showFailureToast=false){
   }
 }
 
+async function loadLiveTodayData(showFailureToast=false){
+  if(!mobileBridge.endpoint || !mobileBridge.key) return false;
+  try{
+    const payload=await jsonpRequest(mobileBridge.endpoint,{
+      action:"today",
+      key:mobileBridge.key
+    });
+    if(!payload || payload.ok!==true) throw new Error(payload?.error || "Invalid Today response.");
+    liveTodayData=payload.data || null;
+    liveTodayLoaded=!!liveTodayData;
+    liveTodayError=null;
+    if(currentRoute()==="today") render("today",true);
+    return true;
+  }catch(err){
+    liveTodayError=err;
+    liveTodayLoaded=false;
+    if(showFailureToast) toast("Today data unavailable - using frozen demo view");
+    return false;
+  }
+}
+
 function homeActionIcon(kind){
   return ({
     clash:"shuffle",
@@ -175,9 +202,11 @@ function runBackendSetupFromQuery(){
     try{
       saveMobileBridgeConfig(endpoint,key);
       history.replaceState({},"",location.pathname+"#home");
-      const ok=await loadLiveHomeData(false);
-      alert(ok ? "Connected. The Home screen is now reading live Op-Sym data." :
-                 "Settings saved, but the first live-data test failed. Check the bridge deployment and key.");
+      const homeOk=await loadLiveHomeData(false);
+      const todayOk=homeOk ? await loadLiveTodayData(false) : false;
+      alert(homeOk && todayOk
+        ? "Connected. Home and Today are now reading live Op-Sym data."
+        : "Settings saved, but a live-data test failed. Check the bridge deployment, version and key.");
     }catch(err){
       alert("Setup was not saved:\n"+err.message);
     }
@@ -204,9 +233,13 @@ function actionRow(iconName,title,sub,warn=false,route=""){
 }
 
 function timelineRows(){
-  return data.today.map(x=>`<button class="timeline-row" data-route="task-detail">
-    <span class="time">${x.time}<br>${x.end}</span><span class="line"></span>
-    <span><strong>${x.title}</strong><small>${x.meta}</small></span><span class="row-arrow">›</span>
+  const items=(liveTodayData?.items?.length ? liveTodayData.items : data.today);
+  if(!items.length){
+    return `<div class="empty-card"><strong>No scheduled items today</strong><small>Your Today plan is currently clear.</small></div>`;
+  }
+  return items.map(x=>`<button class="timeline-row" data-route="task-detail">
+    <span class="time">${escapeHtml(x.time || "ANY")}<br>${escapeHtml(x.end || "")}</span><span class="line"></span>
+    <span><strong>${escapeHtml(x.title)}</strong><small>${escapeHtml(x.meta || "Op-Sym task")}</small></span><span class="row-arrow">›</span>
   </button>`).join("");
 }
 function taskCards(){
@@ -287,8 +320,20 @@ function intro(type,title,sub,button="",tone=""){
   return `<section class="intro ${tone}"><span class="eyebrow">${type}</span><h1 class="page-title">${title}</h1><p class="page-subtitle">${sub}</p>${button}</section>`;
 }
 function today(){
-  const left=intro("TODAY","Own your day.","See what is next, what needs attention and what can move.",`<button class="primary-btn" data-route="capture">Add to today</button>`,"blue");
-  const right=`<section class="section"><div class="section-head"><div><span class="kicker">WEDNESDAY</span><h2>Today's plan</h2><p>4 scheduled items · 2 planning conflicts</p></div><button class="ghost-btn" data-demo="find-time">Find time</button></div><div class="timeline">${timelineRows()}</div></section>`;
+  const td=liveTodayData;
+  const dayLabel=escapeHtml(td?.dayLabel || "WEDNESDAY");
+  const scheduled=td?.summary?.scheduledItems ?? 4;
+  const conflicts=td?.summary?.conflicts ?? 2;
+  const summary=`${scheduled} scheduled ${scheduled===1?"item":"items"} · ${conflicts} planning ${conflicts===1?"conflict":"conflicts"}`;
+
+  const left=intro(
+    "TODAY",
+    "Own your day.",
+    "See what is next, what needs attention and what can move.",
+    `<button class="primary-btn" data-route="capture">Add to today</button>`,
+    "blue"
+  );
+  const right=`<section class="section"><div class="section-head"><div><span class="kicker">${dayLabel}</span><h2>Today's plan</h2><p>${summary}</p></div><button class="ghost-btn" data-demo="find-time">Find time</button></div><div class="timeline">${timelineRows()}</div></section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function tasks(){
@@ -402,6 +447,10 @@ function render(route,replaceHash=false){
   bindDynamic();
   document.getElementById("appMain").focus({preventScroll:true});
   window.scrollTo(0,0);
+
+  if(route==="today" && mobileBridge.endpoint && mobileBridge.key && !liveTodayLoaded){
+    loadLiveTodayData(false);
+  }
 }
 function bindDynamic(){
   document.querySelectorAll("[data-route]").forEach(el=>{
@@ -449,12 +498,14 @@ matchMedia("(orientation: landscape)").addEventListener?.("change",()=>render(lo
 runBackendSetupFromQuery();
 render(location.hash.replace("#","")||"home",true);
 loadLiveHomeData(false);
+loadLiveTodayData(false);
 
-// Refresh live Home data when returning to the app after 60 seconds or more.
+// Refresh live Home and Today data when returning to the app after 60 seconds or more.
 let __lastHomeRefresh=Date.now();
 document.addEventListener("visibilitychange",()=>{
   if(document.visibilityState==="visible" && Date.now()-__lastHomeRefresh>60000){
     __lastHomeRefresh=Date.now();
     loadLiveHomeData(false);
+    loadLiveTodayData(false);
   }
 });
