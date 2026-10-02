@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.0 - HOME ONLY
+   Mobile Backend Integration v1.2 - HOME + TODAY + TASKS
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -57,6 +57,11 @@ let liveHomeError = null;
 let liveTodayData = null;
 let liveTodayLoaded = false;
 let liveTodayError = null;
+
+let liveTasksData = null;
+let liveTasksLoaded = false;
+let liveTasksError = null;
+let activeTaskFilter = "all";
 
 const mobileBridge = {
   endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
@@ -94,6 +99,8 @@ function clearMobileBridgeConfig(){
   liveHomeLoaded=false;
   liveTodayData=null;
   liveTodayLoaded=false;
+  liveTasksData=null;
+  liveTasksLoaded=false;
 }
 
 function jsonpRequest(url,params,timeoutMs=9000){
@@ -163,6 +170,40 @@ async function loadLiveTodayData(showFailureToast=false){
   }
 }
 
+
+async function loadLiveTasksData(showFailureToast=false){
+  if(!mobileBridge.endpoint) return false;
+  try{
+    const params={action:"tasks"};
+    if(mobileBridge.key) params.key=mobileBridge.key;
+    const payload=await jsonpRequest(mobileBridge.endpoint,params);
+    if(!payload || payload.ok!==true) throw new Error(payload?.error || "Invalid Tasks response.");
+    liveTasksData=payload.data || null;
+    liveTasksLoaded=!!liveTasksData;
+    liveTasksError=null;
+    if(currentRoute()==="tasks") render("tasks",true);
+    return true;
+  }catch(err){
+    liveTasksError=err;
+    liveTasksLoaded=false;
+    if(showFailureToast) toast("Tasks data unavailable - using frozen demo view");
+    return false;
+  }
+}
+
+function filteredLiveTasks(){
+  if(!liveTasksLoaded) return null;
+  const items=liveTasksData?.tasks || [];
+  if(activeTaskFilter==="today") return items.filter(x=>x.isToday);
+  if(activeTaskFilter==="unscheduled") return items.filter(x=>x.isUnscheduled);
+  if(activeTaskFilter==="clashes") return items.filter(x=>x.hasClash);
+  return items;
+}
+
+function taskFilterLabel(key){
+  return ({all:"All open",today:"Today",unscheduled:"Unscheduled",clashes:"Clashes"})[key] || "All open";
+}
+
 function homeActionIcon(kind){
   return ({
     clash:"shuffle",
@@ -196,8 +237,9 @@ function runBackendSetupFromQuery(){
       history.replaceState({},"",location.pathname+"#home");
       const homeOk=await loadLiveHomeData(false);
       const todayOk=homeOk ? await loadLiveTodayData(false) : false;
-      alert(homeOk && todayOk
-        ? "Connected. Home and Today are now reading live Op-Sym data."
+      const tasksOk=todayOk ? await loadLiveTasksData(false) : false;
+      alert(homeOk && todayOk && tasksOk
+        ? "Connected. Home, Today and Tasks are now reading live Op-Sym data."
         : "Settings saved, but a live-data test failed. Check the bridge deployment and version.");
     }catch(err){
       alert("Setup was not saved:\n"+err.message);
@@ -235,8 +277,21 @@ function timelineRows(){
   </button>`).join("");
 }
 function taskCards(){
-  return data.tasks.map((t,i)=>`<article class="task-card">
-    <div class="task-top"><div><h3>${t.title}</h3><div class="meta">${t.meta}</div></div><span class="pill">${t.status}</span></div>
+  const liveItems=filteredLiveTasks();
+  const items=liveItems===null ? data.tasks : liveItems;
+
+  if(!items.length){
+    const labels={
+      all:"No open tasks",
+      today:"No open tasks scheduled today",
+      unscheduled:"No unscheduled tasks",
+      clashes:"No tasks with active clashes"
+    };
+    return `<div class="empty-card"><strong>${labels[activeTaskFilter] || labels.all}</strong><small>This view is currently clear.</small></div>`;
+  }
+
+  return items.map(t=>`<article class="task-card">
+    <div class="task-top"><div><h3>${escapeHtml(t.title)}</h3><div class="meta">${escapeHtml(t.meta || "")}</div></div><span class="pill">${escapeHtml(t.status || "Open")}</span></div>
     <div class="task-actions"><button class="done" data-demo="completed">Complete</button><button data-route="task-detail">Details</button></div>
   </article>`).join("");
 }
@@ -329,8 +384,27 @@ function today(){
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function tasks(){
-  const left=intro("TASKS","Turn work into progress.","Focus on the next useful action instead of carrying the whole list in your head.",`<button class="primary-btn" data-route="capture">New task</button>`);
-  const right=`<section class="section"><div class="section-head"><div><span class="kicker">OPEN WORK</span><h2>Tasks</h2></div></div><div class="chip-row"><button class="chip active">All open</button><button class="chip">Today</button><button class="chip">Unscheduled</button><button class="chip">Clashes</button></div><div class="list" style="margin-top:12px">${taskCards()}</div></section>`;
+  const summary=liveTasksData?.summary;
+  const openCount=summary?.open ?? data.tasks.length;
+  const left=intro(
+    "TASKS",
+    "Turn work into progress.",
+    "Focus on the next useful action instead of carrying the whole list in your head.",
+    `<button class="primary-btn" data-route="capture">New task</button>`
+  );
+
+  const filterButton=(key,label)=>`<button class="chip ${activeTaskFilter===key?"active":""}" data-task-filter="${key}">${label}</button>`;
+
+  const right=`<section class="section">
+    <div class="section-head"><div><span class="kicker">OPEN WORK</span><h2>Tasks</h2><p>${openCount} open ${openCount===1?"task":"tasks"}</p></div></div>
+    <div class="chip-row">
+      ${filterButton("all","All open")}
+      ${filterButton("today","Today")}
+      ${filterButton("unscheduled","Unscheduled")}
+      ${filterButton("clashes","Clashes")}
+    </div>
+    <div class="list" style="margin-top:12px">${taskCards()}</div>
+  </section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function inbox(){
@@ -443,6 +517,9 @@ function render(route,replaceHash=false){
   if(route==="today" && mobileBridge.endpoint && !liveTodayLoaded){
     loadLiveTodayData(false);
   }
+  if(route==="tasks" && mobileBridge.endpoint && !liveTasksLoaded){
+    loadLiveTasksData(false);
+  }
 }
 function bindDynamic(){
   document.querySelectorAll("[data-route]").forEach(el=>{
@@ -463,6 +540,11 @@ function bindDynamic(){
   }));
   document.querySelectorAll(".toggle").forEach(el=>el.addEventListener("click",e=>{
     e.preventDefault();e.stopPropagation();el.classList.toggle("on");
+  }));
+
+  document.querySelectorAll("[data-task-filter]").forEach(btn=>btn.addEventListener("click",()=>{
+    activeTaskFilter=btn.dataset.taskFilter || "all";
+    if(currentRoute()==="tasks") render("tasks",true);
   }));
 
   const heroModeButton=document.getElementById("heroModeButton");
@@ -491,13 +573,15 @@ runBackendSetupFromQuery();
 render(location.hash.replace("#","")||"home",true);
 loadLiveHomeData(false);
 loadLiveTodayData(false);
+loadLiveTasksData(false);
 
-// Refresh live Home and Today data when returning to the app after 60 seconds or more.
+// Refresh live Home, Today and Tasks data when returning to the app after 60 seconds or more.
 let __lastHomeRefresh=Date.now();
 document.addEventListener("visibilitychange",()=>{
   if(document.visibilityState==="visible" && Date.now()-__lastHomeRefresh>60000){
     __lastHomeRefresh=Date.now();
     loadLiveHomeData(false);
     loadLiveTodayData(false);
+    loadLiveTasksData(false);
   }
 });
