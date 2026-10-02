@@ -73,13 +73,12 @@ function currentRoute(){
   return location.hash.replace("#","") || "home";
 }
 
-function saveMobileBridgeConfig(endpoint,key){
+function saveMobileBridgeConfig(endpoint,key=""){
   const clean=String(endpoint||"").trim().replace(/\/$/,"");
   const secret=String(key||"").trim();
   if(!/^https:\/\/script\.google\.com\/macros\/s\/.+\/(exec|dev)$/.test(clean)){
     throw new Error("Use the complete Apps Script Web App URL ending in /exec or /dev.");
   }
-  if(secret.length < 32) throw new Error("The access key does not look complete.");
   localStorage.setItem("opsym_mobile_bridge_url",clean);
   localStorage.setItem("opsym_mobile_bridge_key",secret);
   mobileBridge.endpoint=clean;
@@ -124,12 +123,11 @@ function jsonpRequest(url,params,timeoutMs=9000){
 }
 
 async function loadLiveHomeData(showFailureToast=false){
-  if(!mobileBridge.endpoint || !mobileBridge.key) return false;
+  if(!mobileBridge.endpoint) return false;
   try{
-    const payload=await jsonpRequest(mobileBridge.endpoint,{
-      action:"home",
-      key:mobileBridge.key
-    });
+    const params={action:"home"};
+    if(mobileBridge.key) params.key=mobileBridge.key;
+    const payload=await jsonpRequest(mobileBridge.endpoint,params);
     if(!payload || payload.ok!==true) throw new Error(payload?.error || "Invalid Home response.");
     liveHomeData=payload.data || null;
     liveHomeLoaded=!!liveHomeData;
@@ -146,12 +144,11 @@ async function loadLiveHomeData(showFailureToast=false){
 }
 
 async function loadLiveTodayData(showFailureToast=false){
-  if(!mobileBridge.endpoint || !mobileBridge.key) return false;
+  if(!mobileBridge.endpoint) return false;
   try{
-    const payload=await jsonpRequest(mobileBridge.endpoint,{
-      action:"today",
-      key:mobileBridge.key
-    });
+    const params={action:"today"};
+    if(mobileBridge.key) params.key=mobileBridge.key;
+    const payload=await jsonpRequest(mobileBridge.endpoint,params);
     if(!payload || payload.ok!==true) throw new Error(payload?.error || "Invalid Today response.");
     liveTodayData=payload.data || null;
     liveTodayLoaded=!!liveTodayData;
@@ -194,19 +191,14 @@ function runBackendSetupFromQuery(){
       mobileBridge.endpoint || ""
     );
     if(endpoint===null)return;
-    const key=prompt(
-      "Paste the private Mobile Bridge access key.\n\nIt is stored only on this device and is never uploaded to GitHub:",
-      ""
-    );
-    if(key===null)return;
     try{
-      saveMobileBridgeConfig(endpoint,key);
+      saveMobileBridgeConfig(endpoint,"");
       history.replaceState({},"",location.pathname+"#home");
       const homeOk=await loadLiveHomeData(false);
       const todayOk=homeOk ? await loadLiveTodayData(false) : false;
       alert(homeOk && todayOk
         ? "Connected. Home and Today are now reading live Op-Sym data."
-        : "Settings saved, but a live-data test failed. Check the bridge deployment, version and key.");
+        : "Settings saved, but a live-data test failed. Check the bridge deployment and version.");
     }catch(err){
       alert("Setup was not saved:\n"+err.message);
     }
@@ -233,7 +225,7 @@ function actionRow(iconName,title,sub,warn=false,route=""){
 }
 
 function timelineRows(){
-  const items=(liveTodayData?.items?.length ? liveTodayData.items : data.today);
+  const items=(liveTodayLoaded ? (liveTodayData?.items || []) : data.today);
   if(!items.length){
     return `<div class="empty-card"><strong>No scheduled items today</strong><small>Your Today plan is currently clear.</small></div>`;
   }
@@ -448,7 +440,7 @@ function render(route,replaceHash=false){
   document.getElementById("appMain").focus({preventScroll:true});
   window.scrollTo(0,0);
 
-  if(route==="today" && mobileBridge.endpoint && mobileBridge.key && !liveTodayLoaded){
+  if(route==="today" && mobileBridge.endpoint && !liveTodayLoaded){
     loadLiveTodayData(false);
   }
 }
