@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.2 - HOME + TODAY + TASKS
+   Mobile Backend Integration v1.3 - HOME + TODAY + TASKS + TASK DETAIL
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -62,6 +62,13 @@ let liveTasksData = null;
 let liveTasksLoaded = false;
 let liveTasksError = null;
 let activeTaskFilter = "all";
+
+let selectedTaskId = "";
+let liveTaskDetailData = null;
+let liveTaskDetailLoaded = false;
+let liveTaskDetailLoading = false;
+let liveTaskDetailError = null;
+let activeTaskDetailTab = "details";
 
 const mobileBridge = {
   endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
@@ -101,6 +108,10 @@ function clearMobileBridgeConfig(){
   liveTodayLoaded=false;
   liveTasksData=null;
   liveTasksLoaded=false;
+  selectedTaskId="";
+  liveTaskDetailData=null;
+  liveTaskDetailLoaded=false;
+  liveTaskDetailLoading=false;
 }
 
 function jsonpRequest(url,params,timeoutMs=9000){
@@ -191,6 +202,76 @@ async function loadLiveTasksData(showFailureToast=false){
   }
 }
 
+async function loadLiveTaskDetailData(taskId,showFailureToast=false){
+  const id=String(taskId||selectedTaskId||"").trim();
+  if(!mobileBridge.endpoint || !id) return false;
+
+  selectedTaskId=id;
+  liveTaskDetailLoading=true;
+  liveTaskDetailLoaded=false;
+  liveTaskDetailError=null;
+  if(currentRoute()==="task-detail") render("task-detail",true);
+
+  try{
+    const params={action:"task-detail",taskId:id};
+    if(mobileBridge.key) params.key=mobileBridge.key;
+    const payload=await jsonpRequest(mobileBridge.endpoint,params);
+    if(!payload || payload.ok!==true) throw new Error(payload?.error || "Invalid Task Detail response.");
+
+    liveTaskDetailData=payload.data || null;
+    liveTaskDetailLoaded=!!liveTaskDetailData;
+    liveTaskDetailLoading=false;
+    liveTaskDetailError=null;
+
+    if(currentRoute()==="task-detail") render("task-detail",true);
+    return true;
+  }catch(err){
+    liveTaskDetailError=err;
+    liveTaskDetailLoaded=false;
+    liveTaskDetailLoading=false;
+    if(currentRoute()==="task-detail") render("task-detail",true);
+    if(showFailureToast) toast("Task detail unavailable");
+    return false;
+  }
+}
+
+function detailValue(value,fallback="—"){
+  const s=String(value==null?"":value).trim();
+  return escapeHtml(s || fallback);
+}
+
+function taskDetailTabButton(key,label){
+  return `<button class="chip ${activeTaskDetailTab===key?"active":""}" data-task-detail-tab="${key}">${label}</button>`;
+}
+
+function taskInfoRow(label,value){
+  return `<div class="detail-list-row"><span>${escapeHtml(label)}</span><strong>${detailValue(value)}</strong></div>`;
+}
+
+function taskNotesMarkup(notes){
+  if(!notes?.length){
+    return `<div class="empty-card"><strong>No task notes yet</strong><small>Notes will appear here when this task has entries in 34_TASK_NOTES.</small></div>`;
+  }
+  return `<div class="detail-stack">${notes.map(n=>`<article class="note detail-note">
+    <div class="detail-note-head"><strong>${detailValue(n.updatedAt || n.createdAt,"Note")}</strong>${n.pinned?`<span class="pill">${detailValue(n.pinned)}</span>`:""}</div>
+    <p>${detailValue(n.note,"")}</p>
+    ${n.createdBy?`<small>${detailValue(n.createdBy)}</small>`:""}
+  </article>`).join("")}</div>`;
+}
+
+function taskHistoryMarkup(history){
+  if(!history?.length){
+    return `<div class="empty-card"><strong>No task history yet</strong><small>Events from 36_TASK_EVENT_LOG will appear here.</small></div>`;
+  }
+  return `<div class="detail-stack">${history.map(e=>`<article class="history-card">
+    <div class="history-head"><strong>${detailValue(e.eventType,"Task event")}</strong><span>${detailValue(e.timestamp,"")}</span></div>
+    ${e.details?`<p>${detailValue(e.details,"")}</p>`:""}
+    ${(e.oldValue||e.newValue)?`<div class="history-change"><span>${detailValue(e.oldValue,"—")}</span><b>→</b><span>${detailValue(e.newValue,"—")}</span></div>`:""}
+    <small>${[e.source,e.actor].filter(Boolean).map(escapeHtml).join(" · ")}</small>
+  </article>`).join("")}</div>`;
+}
+
+
 function filteredLiveTasks(){
   if(!liveTasksLoaded) return null;
   const items=liveTasksData?.tasks || [];
@@ -271,7 +352,7 @@ function timelineRows(){
   if(!items.length){
     return `<div class="empty-card"><strong>No scheduled items today</strong><small>Your Today plan is currently clear.</small></div>`;
   }
-  return items.map(x=>`<button class="timeline-row" data-route="task-detail">
+  return items.map(x=>`<button class="timeline-row" data-route="task-detail" data-task-id="${escapeHtml(x.taskId || "")}">
     <span class="time">${escapeHtml(x.time || "ANY")}<br>${escapeHtml(x.end || "")}</span><span class="line"></span>
     <span><strong>${escapeHtml(x.title)}</strong><small>${escapeHtml(x.meta || "Op-Sym task")}</small></span><span class="row-arrow">›</span>
   </button>`).join("");
@@ -292,7 +373,7 @@ function taskCards(){
 
   return items.map(t=>`<article class="task-card">
     <div class="task-top"><div><h3>${escapeHtml(t.title)}</h3><div class="meta">${escapeHtml(t.meta || "")}</div></div><span class="pill">${escapeHtml(t.status || "Open")}</span></div>
-    <div class="task-actions"><button class="done" data-demo="completed">Complete</button><button data-route="task-detail">Details</button></div>
+    <div class="task-actions"><button class="done" data-demo="completed">Complete</button><button data-route="task-detail" data-task-id="${escapeHtml(t.taskId || "")}">Details</button></div>
   </article>`).join("");
 }
 function inboxRows(){
@@ -487,13 +568,93 @@ function capture(){
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function taskDetail(){
-  const left=`<section class="task-detail-hero"><span class="eyebrow">TASK</span><h1>Finalize KROS frontend mapping</h1><p class="page-subtitle">Convert approved screens into a verified screen-to-API implementation map.</p><div class="progress"><span></span></div><div class="meta">35% complete</div></section>`;
-  const right=`<section class="section"><div class="detail-grid">
-    <article class="detail-card"><small>PRIORITY</small><strong>High</strong></article>
-    <article class="detail-card"><small>DUE</small><strong>Today · 18:00</strong></article>
-    <article class="detail-card"><small>ROLE</small><strong>Innovation</strong></article>
-    <article class="detail-card"><small>LOCATION</small><strong>Office</strong></article>
-  </div><div class="section-head" style="margin-top:20px"><div><span class="kicker">NOTES</span><h2>Working context</h2></div></div><article class="note"><p>Keep the approved 115-screen structure. Verify role, lifecycle stage, object, API, permissions, event and acceptance test before marking each screen complete.</p></article><div class="task-actions" style="margin-top:12px"><button class="done" data-demo="complete-task">Complete</button><button data-demo="reschedule">Reschedule</button><button data-demo="more-actions">More</button></div></section>`;
+  if(!selectedTaskId){
+    const left=`<section class="task-detail-hero"><span class="eyebrow">TASK</span><h1>Select a task</h1><p class="page-subtitle">Open a task from Today or Tasks to view its live record.</p></section>`;
+    const right=`<section class="section"><div class="empty-card"><strong>No task selected</strong><small>Return to Tasks and choose Details.</small></div><div class="task-actions" style="margin-top:12px"><button data-route="tasks">Back to Tasks</button></div></section>`;
+    return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
+  }
+
+  if(liveTaskDetailLoading && !liveTaskDetailLoaded){
+    const left=`<section class="task-detail-hero"><span class="eyebrow">TASK · ${escapeHtml(selectedTaskId)}</span><h1>Loading task…</h1><p class="page-subtitle">Reading the live task record.</p></section>`;
+    const right=`<section class="section"><div class="empty-card"><strong>Loading task detail</strong><small>Please wait a moment.</small></div></section>`;
+    return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
+  }
+
+  if(liveTaskDetailError && !liveTaskDetailLoaded){
+    const left=`<section class="task-detail-hero"><span class="eyebrow">TASK · ${escapeHtml(selectedTaskId)}</span><h1>Task detail unavailable</h1><p class="page-subtitle">The live task record could not be loaded.</p></section>`;
+    const right=`<section class="section"><div class="empty-card"><strong>Could not load this task</strong><small>${escapeHtml(liveTaskDetailError.message || "Check the Mobile Bridge deployment.")}</small></div><div class="task-actions" style="margin-top:12px"><button data-retry-task-detail>Retry</button><button data-route="tasks">Back to Tasks</button></div></section>`;
+    return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
+  }
+
+  const payload=liveTaskDetailData;
+  const t=payload?.task;
+
+  if(!t){
+    const left=`<section class="task-detail-hero"><span class="eyebrow">TASK · ${escapeHtml(selectedTaskId)}</span><h1>Loading task…</h1><p class="page-subtitle">Reading the live task record.</p></section>`;
+    const right=`<section class="section"><div class="empty-card"><strong>Loading task detail</strong><small>Please wait a moment.</small></div></section>`;
+    return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
+  }
+
+  const pct=Math.max(0,Math.min(100,Number(t.percentComplete)||0));
+  const description=t.description || t.notesField || "No description has been entered for this task.";
+
+  const left=`<section class="task-detail-hero">
+    <span class="eyebrow">TASK · ${escapeHtml(t.taskId)}</span>
+    <h1>${escapeHtml(t.title)}</h1>
+    <p class="page-subtitle">${escapeHtml(description)}</p>
+    <div class="progress"><span style="width:${pct}%"></span></div>
+    <div class="meta">${pct}% complete · ${escapeHtml(t.status || "Open")}</div>
+  </section>`;
+
+  let content="";
+  if(activeTaskDetailTab==="notes"){
+    content=`<div class="section-head"><div><span class="kicker">NOTES</span><h2>Task notes</h2><p>Read-only entries from 34_TASK_NOTES</p></div></div>${taskNotesMarkup(payload.notes || [])}`;
+  }else if(activeTaskDetailTab==="history"){
+    content=`<div class="section-head"><div><span class="kicker">HISTORY</span><h2>Task history</h2><p>Read-only events from 36_TASK_EVENT_LOG</p></div></div>${taskHistoryMarkup(payload.history || [])}`;
+  }else{
+    content=`<div class="detail-grid">
+      <article class="detail-card"><small>PRIORITY</small><strong>${detailValue(t.priority)}</strong></article>
+      <article class="detail-card"><small>DEADLINE</small><strong>${detailValue(t.deadline)}</strong></article>
+      <article class="detail-card"><small>ROLE</small><strong>${detailValue(t.role)}</strong></article>
+      <article class="detail-card"><small>LOCATION</small><strong>${detailValue(t.location)}</strong></article>
+    </div>
+    <div class="section-head" style="margin-top:20px"><div><span class="kicker">DETAILS</span><h2>Task information</h2></div></div>
+    <div class="detail-list">
+      ${taskInfoRow("Project",t.project)}
+      ${taskInfoRow("Owner",t.owner)}
+      ${taskInfoRow("Strategic importance",t.strategicImportance)}
+      ${taskInfoRow("Scheduled date",t.scheduledDate)}
+      ${taskInfoRow("Start time",t.startTime)}
+      ${taskInfoRow("Planned hours",t.plannedHours)}
+      ${taskInfoRow("Earliest start",t.earliestStart)}
+      ${taskInfoRow("Flexibility",t.flexibility)}
+      ${taskInfoRow("Travel / buffer",t.travelBufferMin ? t.travelBufferMin+" min" : "")}
+      ${taskInfoRow("Energy",t.energy)}
+      ${taskInfoRow("Splittable",t.splittable)}
+      ${taskInfoRow("Dependency",t.dependencyTaskId)}
+      ${taskInfoRow("Reminder",t.reminderRule)}
+      ${taskInfoRow("Original scheduled date",t.originalScheduledDate)}
+      ${taskInfoRow("Reschedule count",t.rescheduleCount)}
+      ${taskInfoRow("Clash flag",t.clashFlag)}
+      ${taskInfoRow("Deadline risk",t.deadlineRisk)}
+      ${taskInfoRow("Created",t.created)}
+    </div>`;
+  }
+
+  const right=`<section class="section">
+    <div class="chip-row task-detail-tabs">
+      ${taskDetailTabButton("details","Details")}
+      ${taskDetailTabButton("notes","Notes")}
+      ${taskDetailTabButton("history","History")}
+    </div>
+    <div class="task-detail-tab-content">${content}</div>
+    <div class="task-actions" style="margin-top:14px">
+      <button class="done" data-demo="complete-task">Complete</button>
+      <button data-demo="reschedule">Reschedule</button>
+      <button data-demo="more-actions">More</button>
+    </div>
+  </section>`;
+
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 
@@ -520,12 +681,31 @@ function render(route,replaceHash=false){
   if(route==="tasks" && mobileBridge.endpoint && !liveTasksLoaded){
     loadLiveTasksData(false);
   }
+  if(route==="task-detail" && mobileBridge.endpoint && selectedTaskId &&
+     !liveTaskDetailLoaded && !liveTaskDetailLoading && !liveTaskDetailError){
+    loadLiveTaskDetailData(selectedTaskId,false);
+  }
 }
 function bindDynamic(){
   document.querySelectorAll("[data-route]").forEach(el=>{
     el.addEventListener("click",e=>{
       const r=el.dataset.route;
-      if(r){e.preventDefault();render(r);}
+      if(!r)return;
+      e.preventDefault();
+
+      if(r==="task-detail"){
+        const id=String(el.dataset.taskId||"").trim();
+        if(id){
+          selectedTaskId=id;
+          activeTaskDetailTab="details";
+          liveTaskDetailData=null;
+          liveTaskDetailLoaded=false;
+          liveTaskDetailLoading=false;
+          liveTaskDetailError=null;
+        }
+      }
+
+      render(r);
     });
   });
   document.querySelectorAll("[data-demo]").forEach(el=>{
@@ -545,6 +725,15 @@ function bindDynamic(){
   document.querySelectorAll("[data-task-filter]").forEach(btn=>btn.addEventListener("click",()=>{
     activeTaskFilter=btn.dataset.taskFilter || "all";
     if(currentRoute()==="tasks") render("tasks",true);
+  }));
+
+  document.querySelectorAll("[data-task-detail-tab]").forEach(btn=>btn.addEventListener("click",()=>{
+    activeTaskDetailTab=btn.dataset.taskDetailTab || "details";
+    if(currentRoute()==="task-detail") render("task-detail",true);
+  }));
+
+  document.querySelectorAll("[data-retry-task-detail]").forEach(btn=>btn.addEventListener("click",()=>{
+    loadLiveTaskDetailData(selectedTaskId,true);
   }));
 
   const heroModeButton=document.getElementById("heroModeButton");

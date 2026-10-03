@@ -505,3 +505,101 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
     max-width:100%;
   }
 }
+
+
+/* Mobile Backend v1.3 - Task Detail functional states/tabs.
+   Uses the already-approved Op-Sym card/chip language. */
+.task-detail-tabs{margin-bottom:16px}
+.task-detail-tab-content{min-width:0}
+.detail-list{
+  border:1px solid var(--line);
+  border-radius:18px;
+  overflow:hidden;
+  background:#fff;
+}
+.detail-list-row{
+  display:grid;
+  grid-template-columns:minmax(110px,42%) minmax(0,58%);
+  gap:12px;
+  align-items:start;
+  padding:12px 14px;
+  border-top:1px solid #EEF2F7;
+}
+.detail-list-row:first-child{border-top:0}
+.detail-list-row span{
+  font-size:13px;
+  line-height:1.3;
+  color:var(--slate);
+  font-weight:750;
+}
+.detail-list-row strong{
+  min-width:0;
+  font-size:14px;
+  line-height:1.35;
+  color:var(--navy);
+  font-weight:750;
+  overflow-wrap:anywhere;
+}
+.detail-stack{display:grid;gap:10px}
+.detail-note{padding:14px}
+.detail-note-head,
+.history-head{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:8px;
+}
+.detail-note-head strong,
+.history-head strong{font-size:15px;line-height:1.25}
+.history-head span{
+  flex:0 0 auto;
+  font-size:12px;
+  color:var(--slate);
+  text-align:right;
+}
+.detail-note small,
+.history-card small{
+  display:block;
+  margin-top:9px;
+  font-size:12px;
+  color:var(--slate);
+}
+.history-card{
+  background:#fff;
+  border:1px solid var(--line);
+  border-radius:18px;
+  padding:14px;
+}
+.history-card p{
+  margin:0;
+  font-size:14px;
+  line-height:1.4;
+  color:#334155;
+}
+.history-change{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);
+  gap:8px;
+  align-items:center;
+  margin-top:10px;
+  padding:9px 10px;
+  border-radius:12px;
+  background:#F8FAFC;
+  font-size:12px;
+}
+.history-change span{overflow-wrap:anywhere}
+.history-change b{color:var(--blue)}
+.empty-card{
+  background:#fff;
+  border:1px solid var(--line);
+  border-radius:18px;
+  padding:16px;
+}
+.empty-card strong{display:block;font-size:17px;line-height:1.25}
+.empty-card small{display:block;margin-top:5px;font-size:13px;line-height:1.4;color:var(--slate)}
+
+@media (orientation:landscape) and (max-height:720px){
+  .task-detail-tabs{position:sticky;top:0;background:#fff;z-index:2;padding-top:2px}
+  .detail-list-row{grid-template-columns:minmax(130px,34%) minmax(0,66%)}
+}
