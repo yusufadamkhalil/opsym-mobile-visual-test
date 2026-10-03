@@ -611,3 +611,9 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
   cursor:wait;
   pointer-events:none;
 }
+
+
+/* Mobile Backend v1.5 - controlled reschedule action only */
+.task-actions button[data-reschedule-task]:active{
+  transform:scale(.985);
+}

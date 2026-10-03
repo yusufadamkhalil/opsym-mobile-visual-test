@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.4 - CONTROLLED COMPLETE
+   Mobile Backend Integration v1.5 - CONTROLLED RESCHEDULE
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -70,6 +70,7 @@ let liveTaskDetailLoading = false;
 let liveTaskDetailError = null;
 let activeTaskDetailTab = "details";
 let completeActionInFlight = false;
+let rescheduleActionInFlight = false;
 
 const mobileBridge = {
   endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
@@ -290,6 +291,136 @@ async function completeTaskById(taskId,title=""){
     return false;
   }finally{
     completeActionInFlight=false;
+  }
+}
+
+
+function normalizeDateInput(value){
+  const s=String(value||"").trim();
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return "";
+}
+
+function normalizeTimeInput(value){
+  const s=String(value||"").trim();
+  if(/^\d{2}:\d{2}$/.test(s)) return s;
+  return "";
+}
+
+function formatConflictList(conflicts){
+  if(!conflicts?.length) return "";
+  return conflicts.slice(0,5).map(c=>`• ${c.title} (${c.start}–${c.end})`).join("\n");
+}
+
+async function rescheduleTaskById(taskId,title="",currentDate="",currentTime=""){
+  const id=String(taskId||"").trim();
+  if(!id || rescheduleActionInFlight) return false;
+
+  const proposedDate=prompt(
+    `Reschedule ${title||id}\n\nEnter new date as YYYY-MM-DD:`,
+    normalizeDateInput(currentDate)
+  );
+  if(proposedDate===null) return false;
+
+  const proposedTime=prompt(
+    `Enter new start time in 24-hour format HH:MM:`,
+    normalizeTimeInput(currentTime)
+  );
+  if(proposedTime===null) return false;
+
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(proposedDate.trim())){
+    alert("Date must use YYYY-MM-DD.");
+    return false;
+  }
+  if(!/^\d{2}:\d{2}$/.test(proposedTime.trim())){
+    alert("Time must use HH:MM in 24-hour format.");
+    return false;
+  }
+
+  rescheduleActionInFlight=true;
+  try{
+    const checkParams={
+      action:"check-reschedule",
+      taskId:id,
+      date:proposedDate.trim(),
+      time:proposedTime.trim()
+    };
+    if(mobileBridge.key) checkParams.key=mobileBridge.key;
+
+    const check=await jsonpRequest(mobileBridge.endpoint,checkParams,12000);
+    if(!check || check.ok!==true){
+      throw new Error(check?.error || "Could not check the proposed time.");
+    }
+
+    const preview=check.data || {};
+    if(preview.hasConflict){
+      alert(
+        "This time conflicts with existing work.\n\n"+
+        formatConflictList(preview.conflicts)+
+        "\n\nChoose another time."
+      );
+      return false;
+    }
+
+    const confirmed=confirm(
+      `Reschedule this task?\n\n${title||id}\n${id}\n\n`+
+      `New slot: ${preview.date} at ${preview.time}\n`+
+      `Estimated end: ${preview.endTime}\n\n`+
+      `No direct task overlap was found.`
+    );
+    if(!confirmed) return false;
+
+    const params={
+      action:"reschedule-task",
+      taskId:id,
+      date:preview.date,
+      time:preview.time
+    };
+    if(mobileBridge.key) params.key=mobileBridge.key;
+
+    const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
+    if(!payload || payload.ok!==true){
+      throw new Error(payload?.error || "The task could not be rescheduled.");
+    }
+
+    const result=payload.data || {};
+    if(result.blocked){
+      alert(
+        "The slot became unavailable before the write completed.\n\n"+
+        formatConflictList(result.conflicts)+
+        "\n\nChoose another time."
+      );
+      return false;
+    }
+
+    toast("Task rescheduled");
+
+    // Refresh all live surfaces.
+    liveHomeLoaded=false;
+    liveTodayLoaded=false;
+    liveTasksLoaded=false;
+    liveTaskDetailLoaded=false;
+    liveTaskDetailData=null;
+    liveTaskDetailError=null;
+
+    await Promise.all([
+      loadLiveHomeData(false),
+      loadLiveTodayData(false),
+      loadLiveTasksData(false)
+    ]);
+
+    if(currentRoute()==="task-detail"){
+      await loadLiveTaskDetailData(id,false);
+    }else if(currentRoute()==="tasks"){
+      render("tasks",true);
+    }
+
+    return true;
+  }catch(err){
+    alert("Could not reschedule task:\n"+(err?.message || err));
+    return false;
+  }finally{
+    rescheduleActionInFlight=false;
   }
 }
 
@@ -708,7 +839,7 @@ function taskDetail(){
     <div class="task-detail-tab-content">${content}</div>
     <div class="task-actions" style="margin-top:14px">
       <button class="done" data-complete-task="${escapeHtml(t.taskId)}" data-task-title="${escapeHtml(t.title)}">Complete</button>
-      <button data-demo="reschedule">Reschedule</button>
+      <button data-reschedule-task="${escapeHtml(t.taskId)}" data-task-title="${escapeHtml(t.title)}" data-current-date="${escapeHtml(t.scheduledDateIso || "")}" data-current-time="${escapeHtml(t.startTime || "")}">Reschedule</button>
       <button data-demo="more-actions">More</button>
     </div>
   </section>`;
@@ -789,6 +920,17 @@ function bindDynamic(){
     e.preventDefault();
     e.stopPropagation();
     completeTaskById(btn.dataset.completeTask,btn.dataset.taskTitle || "");
+  }));
+
+  document.querySelectorAll("[data-reschedule-task]").forEach(btn=>btn.addEventListener("click",e=>{
+    e.preventDefault();
+    e.stopPropagation();
+    rescheduleTaskById(
+      btn.dataset.rescheduleTask,
+      btn.dataset.taskTitle || "",
+      btn.dataset.currentDate || "",
+      btn.dataset.currentTime || ""
+    );
   }));
 
   document.querySelectorAll("[data-task-detail-tab]").forEach(btn=>btn.addEventListener("click",()=>{
