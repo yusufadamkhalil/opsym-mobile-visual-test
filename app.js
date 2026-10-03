@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.5.1 - SMART RESCHEDULE SUGGESTIONS
+   Mobile Backend Integration v1.6 - NEW TASK + ADD TO TODAY
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -71,6 +71,8 @@ let liveTaskDetailError = null;
 let activeTaskDetailTab = "details";
 let completeActionInFlight = false;
 let rescheduleActionInFlight = false;
+let captureEntryMode = "general";
+let createTaskInFlight = false;
 
 const mobileBridge = {
   endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
@@ -294,6 +296,90 @@ async function completeTaskById(taskId,title=""){
   }
 }
 
+
+
+async function createTaskFromForm(){
+  if(createTaskInFlight) return false;
+
+  const title=document.getElementById("newTaskTitle")?.value.trim() || "";
+  const role=document.getElementById("newTaskRole")?.value.trim() || "";
+  const project=document.getElementById("newTaskProject")?.value.trim() || "";
+  const priority=document.getElementById("newTaskPriority")?.value || "Medium";
+  const plannedHours=document.getElementById("newTaskHours")?.value.trim() || "";
+  const date=document.getElementById("newTaskDate")?.value || "";
+  const time=document.getElementById("newTaskTime")?.value || "";
+  const location=document.getElementById("newTaskLocation")?.value.trim() || "";
+  const description=document.getElementById("newTaskDescription")?.value.trim() || "";
+
+  if(!title){
+    alert("Enter a task title.");
+    document.getElementById("newTaskTitle")?.focus();
+    return false;
+  }
+
+  if(time && !date){
+    alert("Choose a scheduled date when entering a start time.");
+    return false;
+  }
+
+  const scheduleText=date
+    ? `${date}${time?` at ${time}`:" (any time)"}`
+    : "Unscheduled";
+
+  const confirmed=confirm(
+    `Create this task?\n\n${title}\n\n`+
+    `Priority: ${priority}\n`+
+    `Schedule: ${scheduleText}`
+  );
+  if(!confirmed) return false;
+
+  createTaskInFlight=true;
+  try{
+    const params={
+      action:"create-task",
+      title,role,project,priority,
+      plannedHours,date,time,location,description
+    };
+    if(mobileBridge.key) params.key=mobileBridge.key;
+
+    const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
+    if(!payload || payload.ok!==true){
+      throw new Error(payload?.error || "The task could not be created.");
+    }
+
+    const result=payload.data || {};
+    if(result.blocked){
+      alert(
+        "This time conflicts with existing work.\n\n"+
+        formatConflictList(result.conflicts)+
+        "\n\nChoose another time before creating the task."
+      );
+      return false;
+    }
+
+    toast(`Created ${result.taskId || "task"}`);
+
+    liveHomeLoaded=false;
+    liveTodayLoaded=false;
+    liveTasksLoaded=false;
+
+    await Promise.all([
+      loadLiveHomeData(false),
+      loadLiveTodayData(false),
+      loadLiveTasksData(false)
+    ]);
+
+    const destination=captureEntryMode==="today" ? "today" : "tasks";
+    captureEntryMode="general";
+    render(destination,true);
+    return true;
+  }catch(err){
+    alert("Could not create task:\n"+(err?.message || err));
+    return false;
+  }finally{
+    createTaskInFlight=false;
+  }
+}
 
 function normalizeDateInput(value){
   const s=String(value||"").trim();
@@ -784,7 +870,7 @@ function today(){
     "TODAY",
     "Own your day.",
     "See what is next, what needs attention and what can move.",
-    `<button class="primary-btn" data-route="capture">Add to today</button>`,
+    `<button class="primary-btn" data-route="capture" data-capture-mode="today">Add to today</button>`,
     "blue"
   );
   const right=`<section class="section"><div class="section-head"><div><span class="kicker">${dayLabel}</span><h2>Today's plan</h2><p>${summary}</p></div><button class="ghost-btn" data-demo="find-time">Find time</button></div><div class="timeline">${timelineRows()}</div></section>`;
@@ -797,7 +883,7 @@ function tasks(){
     "TASKS",
     "Turn work into progress.",
     "Focus on the next useful action instead of carrying the whole list in your head.",
-    `<button class="primary-btn" data-route="capture">New task</button>`
+    `<button class="primary-btn" data-route="capture" data-capture-mode="task">New task</button>`
   );
 
   const filterButton=(key,label)=>`<button class="chip ${activeTaskFilter===key?"active":""}" data-task-filter="${key}">${label}</button>`;
@@ -884,9 +970,86 @@ function settings(){
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function capture(){
+  const taskMode=captureEntryMode==="task" || captureEntryMode==="today";
+
+  if(taskMode){
+    const addToday=captureEntryMode==="today";
+    const todayIso=new Date().toLocaleDateString("en-CA");
+
+    const left=`<section class="capture-hero">
+      <span class="eyebrow">${addToday?"ADD TO TODAY":"NEW TASK"}</span>
+      <h1 class="page-title">${addToday?"Add something to today.":"Create a clear next action."}</h1>
+      <p class="page-subtitle">${addToday
+        ?"Create a real task in Op-Sym and place it on today's plan."
+        :"Create a real task in 02_MASTER_TASKS. Schedule it now or leave it open and unscheduled."}</p>
+    </section>`;
+
+    const right=`<section class="section white">
+      <form id="newTaskForm" class="new-task-form">
+        <label class="form-field full">
+          <span>Task title *</span>
+          <input id="newTaskTitle" type="text" maxlength="180" placeholder="e.g. Review Op-Sym v1.6" required>
+        </label>
+
+        <div class="form-grid">
+          <label class="form-field">
+            <span>Role</span>
+            <input id="newTaskRole" type="text" maxlength="80" placeholder="Innovation">
+          </label>
+          <label class="form-field">
+            <span>Project</span>
+            <input id="newTaskProject" type="text" maxlength="100" placeholder="Op-Sym">
+          </label>
+          <label class="form-field">
+            <span>Priority</span>
+            <select id="newTaskPriority">
+              <option>Medium</option>
+              <option>High</option>
+              <option>Low</option>
+              <option>Urgent</option>
+            </select>
+          </label>
+          <label class="form-field">
+            <span>Planned hours</span>
+            <input id="newTaskHours" type="number" min="0.25" step="0.25" placeholder="1">
+          </label>
+          <label class="form-field">
+            <span>Scheduled date</span>
+            <input id="newTaskDate" type="date" value="${addToday?todayIso:""}" ${addToday?"readonly":""}>
+          </label>
+          <label class="form-field">
+            <span>Start time</span>
+            <input id="newTaskTime" type="time">
+          </label>
+          <label class="form-field full">
+            <span>Location</span>
+            <input id="newTaskLocation" type="text" maxlength="120" placeholder="Optional">
+          </label>
+          <label class="form-field full">
+            <span>Description</span>
+            <textarea id="newTaskDescription" rows="4" maxlength="1200" placeholder="Optional notes about the task"></textarea>
+          </label>
+        </div>
+
+        <div class="create-task-note">
+          ${addToday
+            ?"Today is preselected. If you leave Start time blank, the item will appear in Today as an ANY-time task."
+            :"Leave Scheduled date blank if you want this to remain an open unscheduled task."}
+        </div>
+
+        <div class="capture-primary">
+          <button type="submit" class="interpret">Create task</button>
+          <button type="button" class="inbox" data-capture-cancel>Cancel</button>
+        </div>
+      </form>
+    </section>`;
+
+    return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
+  }
+
   const left=`<section class="capture-hero"><span class="eyebrow">CAPTURE</span><h1 class="page-title">Get it out of your head.</h1><p class="page-subtitle">Type naturally. Op-Sym should structure the next step after you capture it.</p></section>`;
   const right=`<section class="section white"><div class="capture-box"><textarea id="captureText" placeholder="e.g. Meet Gilbert tomorrow at 10 am to review the KROS frontend..."></textarea><div class="capture-primary"><button class="interpret" data-demo="interpret">Interpret & schedule</button><button class="inbox" data-demo="inbox-only">Inbox only</button></div><div class="shortcut-grid">
-    <button class="shortcut" data-demo="task">${icon("task")}<strong>Task</strong></button>
+    <button class="shortcut" data-start-task-form>${icon("task")}<strong>Task</strong></button>
     <button class="shortcut" data-demo="event">${icon("calendar")}<strong>Event</strong></button>
     <button class="shortcut" data-demo="commitment">${icon("target")}<strong>Commitment</strong></button>
     <button class="shortcut" data-demo="paste">${icon("note")}<strong>Paste</strong></button>
@@ -1031,6 +1194,10 @@ function bindDynamic(){
         }
       }
 
+      if(r==="capture"){
+        captureEntryMode=el.dataset.captureMode || "general";
+      }
+
       render(r);
     });
   });
@@ -1051,6 +1218,23 @@ function bindDynamic(){
   document.querySelectorAll("[data-task-filter]").forEach(btn=>btn.addEventListener("click",()=>{
     activeTaskFilter=btn.dataset.taskFilter || "all";
     if(currentRoute()==="tasks") render("tasks",true);
+  }));
+
+  document.getElementById("newTaskForm")?.addEventListener("submit",e=>{
+    e.preventDefault();
+    createTaskFromForm();
+  });
+
+  document.querySelectorAll("[data-capture-cancel]").forEach(btn=>btn.addEventListener("click",()=>{
+    const destination=captureEntryMode==="today" ? "today" : "tasks";
+    captureEntryMode="general";
+    render(destination);
+  }));
+
+  document.querySelectorAll("[data-start-task-form]").forEach(btn=>btn.addEventListener("click",e=>{
+    e.preventDefault();
+    captureEntryMode="task";
+    render("capture",true);
   }));
 
   document.querySelectorAll("[data-complete-task]").forEach(btn=>btn.addEventListener("click",e=>{
