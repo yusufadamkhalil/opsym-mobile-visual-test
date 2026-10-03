@@ -617,3 +617,165 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
 .task-actions button[data-reschedule-task]:active{
   transform:scale(.985);
 }
+
+
+/* v1.5.1 Smart Reschedule Suggestions */
+.smart-reschedule-overlay{
+  position:fixed;
+  inset:0;
+  z-index:9999;
+  display:flex;
+  align-items:flex-end;
+  justify-content:center;
+  padding:14px;
+  background:rgba(11,26,60,.48);
+  backdrop-filter:blur(2px);
+}
+.smart-reschedule-sheet{
+  width:min(100%,680px);
+  max-height:min(82vh,760px);
+  overflow:auto;
+  border-radius:28px 28px 22px 22px;
+  background:#fff;
+  padding:12px 16px 20px;
+  box-shadow:0 -18px 60px rgba(11,26,60,.22);
+}
+.smart-sheet-handle{
+  width:42px;
+  height:5px;
+  margin:1px auto 14px;
+  border-radius:99px;
+  background:#CBD5E1;
+}
+.smart-sheet-head{
+  display:flex;
+  gap:14px;
+  align-items:flex-start;
+  justify-content:space-between;
+}
+.smart-sheet-head h2{
+  margin:2px 0 5px;
+  font-size:24px;
+  line-height:1.12;
+  color:var(--navy);
+}
+.smart-sheet-head p{
+  margin:0;
+  font-size:14px;
+  line-height:1.4;
+  color:var(--slate);
+}
+.smart-close{
+  flex:0 0 44px;
+  width:44px;
+  height:44px;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:#fff;
+  font-size:29px;
+  line-height:1;
+  color:var(--slate);
+}
+.smart-conflicts{
+  margin:16px 0;
+  padding:8px 12px;
+  border:1px solid #F3D4C8;
+  border-radius:16px;
+  background:#FFF8F5;
+}
+.smart-conflict-row{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:12px;
+  align-items:center;
+  padding:9px 0;
+  border-top:1px solid rgba(148,163,184,.18);
+}
+.smart-conflict-row:first-child{border-top:0}
+.smart-conflict-row span{
+  min-width:0;
+  font-size:14px;
+  color:#475569;
+  overflow-wrap:anywhere;
+}
+.smart-conflict-row strong{
+  font-size:13px;
+  color:#7C2D12;
+  white-space:nowrap;
+}
+.smart-section-label{
+  margin:15px 0 9px;
+  font-size:13px;
+  font-weight:800;
+  letter-spacing:.03em;
+  color:var(--slate);
+  text-transform:uppercase;
+}
+.smart-slots{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:10px;
+}
+.smart-slot{
+  min-height:68px;
+  padding:12px 10px;
+  border:1px solid #CFE0FF;
+  border-radius:16px;
+  background:#F7FAFF;
+  text-align:left;
+}
+.smart-slot strong{
+  display:block;
+  font-size:17px;
+  line-height:1.2;
+  color:var(--blue);
+}
+.smart-slot small{
+  display:block;
+  margin-top:4px;
+  font-size:12px;
+  color:var(--slate);
+}
+.smart-slot:active{
+  transform:scale(.985);
+  background:#EEF5FF;
+}
+.smart-more-times,
+.smart-next-day,
+.smart-manual{
+  width:100%;
+  min-height:48px;
+  margin-top:10px;
+  border:1px solid var(--line);
+  border-radius:15px;
+  background:#fff;
+  font-weight:800;
+  color:var(--blue);
+}
+.smart-manual{
+  margin-top:16px;
+  color:var(--slate);
+}
+.smart-no-slots{
+  margin-top:16px;
+  padding:14px;
+  border-radius:16px;
+  background:#F8FAFC;
+  color:#475569;
+  line-height:1.45;
+}
+.smart-extra-slots,
+.smart-next-day-slots{margin-top:10px}
+
+@media (max-width:420px){
+  .smart-slots{grid-template-columns:1fr}
+  .smart-reschedule-sheet{border-radius:24px 24px 18px 18px}
+}
+@media (orientation:landscape) and (max-height:720px){
+  .smart-reschedule-overlay{align-items:center}
+  .smart-reschedule-sheet{
+    max-height:90vh;
+    border-radius:22px;
+  }
+  .smart-slots{grid-template-columns:repeat(3,minmax(0,1fr))}
+}

@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.5 - CONTROLLED RESCHEDULE
+   Mobile Backend Integration v1.5.1 - SMART RESCHEDULE SUGGESTIONS
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -354,74 +354,211 @@ async function rescheduleTaskById(taskId,title="",currentDate="",currentTime="")
 
     const preview=check.data || {};
     if(preview.hasConflict){
-      alert(
-        "This time conflicts with existing work.\n\n"+
-        formatConflictList(preview.conflicts)+
-        "\n\nChoose another time."
-      );
+      const suggestions=await fetchSmartRescheduleSuggestions(id,preview.date);
+      showSmartRescheduleSheet({
+        taskId:id,
+        title:title||id,
+        conflictPreview:preview,
+        suggestions
+      });
       return false;
     }
 
-    const confirmed=confirm(
-      `Reschedule this task?\n\n${title||id}\n${id}\n\n`+
-      `New slot: ${preview.date} at ${preview.time}\n`+
-      `Estimated end: ${preview.endTime}\n\n`+
-      `No direct task overlap was found.`
-    );
-    if(!confirmed) return false;
-
-    const params={
-      action:"reschedule-task",
-      taskId:id,
-      date:preview.date,
-      time:preview.time
-    };
-    if(mobileBridge.key) params.key=mobileBridge.key;
-
-    const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
-    if(!payload || payload.ok!==true){
-      throw new Error(payload?.error || "The task could not be rescheduled.");
-    }
-
-    const result=payload.data || {};
-    if(result.blocked){
-      alert(
-        "The slot became unavailable before the write completed.\n\n"+
-        formatConflictList(result.conflicts)+
-        "\n\nChoose another time."
-      );
-      return false;
-    }
-
-    toast("Task rescheduled");
-
-    // Refresh all live surfaces.
-    liveHomeLoaded=false;
-    liveTodayLoaded=false;
-    liveTasksLoaded=false;
-    liveTaskDetailLoaded=false;
-    liveTaskDetailData=null;
-    liveTaskDetailError=null;
-
-    await Promise.all([
-      loadLiveHomeData(false),
-      loadLiveTodayData(false),
-      loadLiveTasksData(false)
-    ]);
-
-    if(currentRoute()==="task-detail"){
-      await loadLiveTaskDetailData(id,false);
-    }else if(currentRoute()==="tasks"){
-      render("tasks",true);
-    }
-
-    return true;
+    return await confirmAndWriteReschedule(id,title||id,preview);
   }catch(err){
     alert("Could not reschedule task:\n"+(err?.message || err));
     return false;
   }finally{
     rescheduleActionInFlight=false;
   }
+}
+
+async function fetchSmartRescheduleSuggestions(taskId,date){
+  const params={action:"suggest-reschedule",taskId,date};
+  if(mobileBridge.key) params.key=mobileBridge.key;
+  const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
+  if(!payload || payload.ok!==true){
+    throw new Error(payload?.error || "Could not calculate available times.");
+  }
+  return payload.data || {};
+}
+
+async function confirmAndWriteReschedule(taskId,title,preview){
+  const confirmed=confirm(
+    `Reschedule this task?\n\n${title}\n${taskId}\n\n`+
+    `New slot: ${preview.date} at ${preview.time}\n`+
+    `Estimated end: ${preview.endTime}\n\n`+
+    `No direct task overlap was found.`
+  );
+  if(!confirmed) return false;
+
+  const params={
+    action:"reschedule-task",
+    taskId,
+    date:preview.date,
+    time:preview.time
+  };
+  if(mobileBridge.key) params.key=mobileBridge.key;
+
+  const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
+  if(!payload || payload.ok!==true){
+    throw new Error(payload?.error || "The task could not be rescheduled.");
+  }
+
+  const result=payload.data || {};
+  if(result.blocked){
+    const suggestions=await fetchSmartRescheduleSuggestions(taskId,preview.date);
+    showSmartRescheduleSheet({
+      taskId,
+      title,
+      conflictPreview:{conflicts:result.conflicts||[],date:preview.date},
+      suggestions
+    });
+    return false;
+  }
+
+  closeSmartRescheduleSheet();
+  toast("Task rescheduled");
+
+  liveHomeLoaded=false;
+  liveTodayLoaded=false;
+  liveTasksLoaded=false;
+  liveTaskDetailLoaded=false;
+  liveTaskDetailData=null;
+  liveTaskDetailError=null;
+
+  await Promise.all([
+    loadLiveHomeData(false),
+    loadLiveTodayData(false),
+    loadLiveTasksData(false)
+  ]);
+
+  if(currentRoute()==="task-detail"){
+    await loadLiveTaskDetailData(taskId,false);
+  }else if(currentRoute()==="tasks"){
+    render("tasks",true);
+  }
+
+  return true;
+}
+
+function smartRescheduleSlotMarkup(slot){
+  return `<button class="smart-slot"
+    data-smart-slot-date="${escapeHtml(slot.date||"")}"
+    data-smart-slot-start="${escapeHtml(slot.startTime||"")}"
+    data-smart-slot-end="${escapeHtml(slot.endTime||"")}">
+    <strong>${escapeHtml(slot.label||"Available")}</strong>
+    <small>Available</small>
+  </button>`;
+}
+
+function showSmartRescheduleSheet({taskId,title,conflictPreview,suggestions}){
+  closeSmartRescheduleSheet();
+
+  const conflicts=conflictPreview?.conflicts || [];
+  const sameDay=suggestions?.slots || [];
+  const first=sameDay.slice(0,5);
+  const extra=sameDay.slice(5);
+  const next=suggestions?.nextAvailableDay || null;
+
+  const conflictHtml=conflicts.length
+    ? `<div class="smart-conflicts">${conflicts.map(c=>`
+        <div class="smart-conflict-row">
+          <span>${escapeHtml(c.title||c.taskId||"Task")}</span>
+          <strong>${escapeHtml((c.start||"")+"-"+(c.end||""))}</strong>
+        </div>`).join("")}</div>`
+    : "";
+
+  let slotHtml="";
+  if(first.length){
+    slotHtml=`
+      <div class="smart-section-label">Available times ${escapeHtml(suggestions.requestedDateLabel||"that day")}</div>
+      <div class="smart-slots">${first.map(smartRescheduleSlotMarkup).join("")}</div>
+      ${extra.length?`<button class="smart-more-times" data-smart-more-times>More times</button>
+        <div class="smart-slots smart-extra-slots" hidden>${extra.map(smartRescheduleSlotMarkup).join("")}</div>`:""}`;
+  }else if(next?.slots?.length){
+    slotHtml=`
+      <div class="smart-no-slots">No suitable slot remains on ${escapeHtml(suggestions.requestedDateLabel||"that day")}.</div>
+      <button class="smart-next-day" data-smart-next-day>Show next available day</button>
+      <div class="smart-next-day-slots" hidden>
+        <div class="smart-section-label">${escapeHtml(next.dateLabel||next.date||"Next available day")}</div>
+        <div class="smart-slots">${next.slots.map(smartRescheduleSlotMarkup).join("")}</div>
+      </div>`;
+  }else{
+    slotHtml=`<div class="smart-no-slots">No suitable slot was found in the next 7 days within the current 06:00-23:00 development window.</div>`;
+  }
+
+  const overlay=document.createElement("div");
+  overlay.id="smartRescheduleOverlay";
+  overlay.className="smart-reschedule-overlay";
+  overlay.innerHTML=`
+    <section class="smart-reschedule-sheet" role="dialog" aria-modal="true" aria-label="Smart reschedule suggestions">
+      <div class="smart-sheet-handle"></div>
+      <div class="smart-sheet-head">
+        <div>
+          <span class="kicker">SMART RESCHEDULE</span>
+          <h2>Choose an available time</h2>
+          <p>Your first choice conflicts with existing work.</p>
+        </div>
+        <button class="smart-close" data-smart-close aria-label="Close">×</button>
+      </div>
+      ${conflictHtml}
+      ${slotHtml}
+      <button class="smart-manual" data-smart-manual>Enter another time manually</button>
+    </section>`;
+
+  document.body.appendChild(overlay);
+
+  const chooseSlot=async btn=>{
+    const date=btn.dataset.smartSlotDate;
+    const time=btn.dataset.smartSlotStart;
+    const end=btn.dataset.smartSlotEnd;
+    const preview={date,time,endTime:end,hasConflict:false,conflicts:[]};
+
+    rescheduleActionInFlight=true;
+    try{
+      await confirmAndWriteReschedule(taskId,title,preview);
+    }catch(err){
+      alert("Could not reschedule task:\n"+(err?.message||err));
+    }finally{
+      rescheduleActionInFlight=false;
+    }
+  };
+
+  overlay.querySelectorAll("[data-smart-slot-date]").forEach(btn=>{
+    btn.addEventListener("click",()=>chooseSlot(btn));
+  });
+
+  overlay.querySelector("[data-smart-close]")?.addEventListener("click",closeSmartRescheduleSheet);
+
+  overlay.querySelector("[data-smart-more-times]")?.addEventListener("click",e=>{
+    const extraBox=overlay.querySelector(".smart-extra-slots");
+    if(extraBox){
+      extraBox.hidden=false;
+      e.currentTarget.hidden=true;
+    }
+  });
+
+  overlay.querySelector("[data-smart-next-day]")?.addEventListener("click",e=>{
+    const box=overlay.querySelector(".smart-next-day-slots");
+    if(box){
+      box.hidden=false;
+      e.currentTarget.hidden=true;
+    }
+  });
+
+  overlay.querySelector("[data-smart-manual]")?.addEventListener("click",()=>{
+    closeSmartRescheduleSheet();
+    setTimeout(()=>rescheduleTaskById(taskId,title,conflictPreview?.date||"", ""),50);
+  });
+
+  overlay.addEventListener("click",e=>{
+    if(e.target===overlay) closeSmartRescheduleSheet();
+  });
+}
+
+function closeSmartRescheduleSheet(){
+  document.getElementById("smartRescheduleOverlay")?.remove();
 }
 
 function detailValue(value,fallback="—"){
