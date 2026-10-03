@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.6 - NEW TASK + ADD TO TODAY
+   Mobile Backend Integration v1.7 - NATURAL LANGUAGE CAPTURE
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -73,6 +73,8 @@ let completeActionInFlight = false;
 let rescheduleActionInFlight = false;
 let captureEntryMode = "general";
 let createTaskInFlight = false;
+let captureInterpretInFlight = false;
+let interpretedCaptureDraft = null;
 
 const mobileBridge = {
   endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
@@ -298,6 +300,108 @@ async function completeTaskById(taskId,title=""){
 
 
 
+
+async function interpretCaptureText(){
+  if(captureInterpretInFlight) return false;
+
+  const box=document.getElementById("captureText");
+  const textValue=box?.value.trim() || "";
+  if(!textValue){
+    alert("Type or paste something for Op-Sym to interpret.");
+    box?.focus();
+    return false;
+  }
+
+  captureInterpretInFlight=true;
+  try{
+    const params={action:"interpret-capture",text:textValue};
+    if(mobileBridge.key) params.key=mobileBridge.key;
+
+    const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
+    if(!payload || payload.ok!==true){
+      throw new Error(payload?.error || "The capture could not be interpreted.");
+    }
+
+    interpretedCaptureDraft=payload.data || null;
+    showCaptureReviewSheet(interpretedCaptureDraft);
+    return true;
+  }catch(err){
+    alert("Could not interpret capture:\n"+(err?.message || err));
+    return false;
+  }finally{
+    captureInterpretInFlight=false;
+  }
+}
+
+function captureReviewRow(label,value){
+  const v=String(value==null?"":value).trim();
+  return `<div class="capture-review-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(v || "—")}</strong></div>`;
+}
+
+function showCaptureReviewSheet(draft){
+  closeCaptureReviewSheet();
+  if(!draft) return;
+
+  const warnings=(draft.warnings || []);
+  const overlay=document.createElement("div");
+  overlay.id="captureReviewOverlay";
+  overlay.className="capture-review-overlay";
+  overlay.innerHTML=`
+    <section class="capture-review-sheet" role="dialog" aria-modal="true" aria-label="Review interpreted capture">
+      <div class="capture-sheet-handle"></div>
+      <div class="capture-sheet-head">
+        <div>
+          <span class="kicker">INTERPRETED CAPTURE</span>
+          <h2>Review before creating</h2>
+          <p>Op-Sym has proposed a task. Nothing has been written yet.</p>
+        </div>
+        <button class="capture-review-close" data-capture-review-close aria-label="Close">×</button>
+      </div>
+
+      <div class="capture-confidence">
+        <span>Interpretation confidence</span>
+        <strong>${escapeHtml(draft.confidenceLabel || "Needs review")} · ${Math.round((Number(draft.confidence)||0)*100)}%</strong>
+      </div>
+
+      ${warnings.length ? `<div class="capture-warnings">
+        ${warnings.map(w=>`<div>• ${escapeHtml(w)}</div>`).join("")}
+      </div>` : ""}
+
+      <div class="capture-review-list">
+        ${captureReviewRow("Task",draft.title)}
+        ${captureReviewRow("Date",draft.date)}
+        ${captureReviewRow("Start time",draft.time)}
+        ${captureReviewRow("Planned hours",draft.plannedHours)}
+        ${captureReviewRow("Priority",draft.priority)}
+        ${captureReviewRow("Role",draft.role)}
+        ${captureReviewRow("Location",draft.location)}
+      </div>
+
+      <div class="capture-review-actions">
+        <button class="primary-btn" data-capture-use-draft>Review & create</button>
+        <button data-capture-edit-text>Edit original text</button>
+      </div>
+    </section>`;
+
+  document.body.appendChild(overlay);
+
+  overlay.querySelector("[data-capture-review-close]")?.addEventListener("click",closeCaptureReviewSheet);
+  overlay.querySelector("[data-capture-edit-text]")?.addEventListener("click",closeCaptureReviewSheet);
+  overlay.addEventListener("click",e=>{
+    if(e.target===overlay) closeCaptureReviewSheet();
+  });
+
+  overlay.querySelector("[data-capture-use-draft]")?.addEventListener("click",()=>{
+    closeCaptureReviewSheet();
+    captureEntryMode="interpreted";
+    render("capture",true);
+  });
+}
+
+function closeCaptureReviewSheet(){
+  document.getElementById("captureReviewOverlay")?.remove();
+}
+
 async function createTaskFromForm(){
   if(createTaskInFlight) return false;
 
@@ -371,6 +475,7 @@ async function createTaskFromForm(){
 
     const destination=captureEntryMode==="today" ? "today" : "tasks";
     captureEntryMode="general";
+    interpretedCaptureDraft=null;
     render(destination,true);
     return true;
   }catch(err){
@@ -970,71 +1075,77 @@ function settings(){
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function capture(){
-  const taskMode=captureEntryMode==="task" || captureEntryMode==="today";
+  const taskMode=captureEntryMode==="task" || captureEntryMode==="today" || captureEntryMode==="interpreted";
 
   if(taskMode){
     const addToday=captureEntryMode==="today";
+    const interpreted=captureEntryMode==="interpreted" && interpretedCaptureDraft;
+    const draft=interpretedCaptureDraft || {};
     const todayIso=new Date().toLocaleDateString("en-CA");
 
     const left=`<section class="capture-hero">
-      <span class="eyebrow">${addToday?"ADD TO TODAY":"NEW TASK"}</span>
-      <h1 class="page-title">${addToday?"Add something to today.":"Create a clear next action."}</h1>
-      <p class="page-subtitle">${addToday
-        ?"Create a real task in Op-Sym and place it on today's plan."
-        :"Create a real task in 02_MASTER_TASKS. Schedule it now or leave it open and unscheduled."}</p>
+      <span class="eyebrow">${interpreted?"INTERPRETED CAPTURE":(addToday?"ADD TO TODAY":"NEW TASK")}</span>
+      <h1 class="page-title">${interpreted?"Review the proposed task.":(addToday?"Add something to today.":"Create a clear next action.")}</h1>
+      <p class="page-subtitle">${interpreted
+        ?"Correct anything Op-Sym misunderstood, then create only when the proposal is right."
+        :(addToday
+          ?"Create a real task in Op-Sym and place it on today's plan."
+          :"Create a real task in 02_MASTER_TASKS. Schedule it now or leave it open and unscheduled.")}</p>
     </section>`;
 
     const right=`<section class="section white">
       <form id="newTaskForm" class="new-task-form">
         <label class="form-field full">
           <span>Task title *</span>
-          <input id="newTaskTitle" type="text" maxlength="180" placeholder="e.g. Review Op-Sym v1.6" required>
+          <input id="newTaskTitle" type="text" maxlength="180" placeholder="e.g. Review Op-Sym v1.7" value="${escapeHtml(interpreted?(draft.title||""):"")}" required>
         </label>
 
         <div class="form-grid">
           <label class="form-field">
             <span>Role</span>
-            <input id="newTaskRole" type="text" maxlength="80" placeholder="Innovation">
+            <input id="newTaskRole" type="text" maxlength="80" placeholder="Innovation" value="${escapeHtml(interpreted?(draft.role||""):"")}">
           </label>
           <label class="form-field">
             <span>Project</span>
-            <input id="newTaskProject" type="text" maxlength="100" placeholder="Op-Sym">
+            <input id="newTaskProject" type="text" maxlength="100" placeholder="Op-Sym" value="${escapeHtml(interpreted?(draft.project||""):"")}">
           </label>
           <label class="form-field">
             <span>Priority</span>
             <select id="newTaskPriority">
-              <option>Medium</option>
-              <option>High</option>
-              <option>Low</option>
-              <option>Urgent</option>
+              <option ${(!interpreted || draft.priority==="Medium")?"selected":""}>Medium</option>
+              <option ${interpreted && draft.priority==="High"?"selected":""}>High</option>
+              <option ${interpreted && draft.priority==="Low"?"selected":""}>Low</option>
+              <option ${interpreted && draft.priority==="Urgent"?"selected":""}>Urgent</option>
             </select>
           </label>
           <label class="form-field">
             <span>Planned hours</span>
-            <input id="newTaskHours" type="number" min="0.25" step="0.25" placeholder="1">
+            <input id="newTaskHours" type="number" min="0.25" step="0.25" placeholder="1" value="${escapeHtml(interpreted && draft.plannedHours ? String(draft.plannedHours) : "")}">
           </label>
           <label class="form-field">
             <span>Scheduled date</span>
-            <input id="newTaskDate" type="date" value="${addToday?todayIso:""}" ${addToday?"readonly":""}>
+            <input id="newTaskDate" type="date" value="${addToday?todayIso:(interpreted?(draft.date||""):"")}" ${addToday?"readonly":""}>
           </label>
           <label class="form-field">
             <span>Start time</span>
-            <input id="newTaskTime" type="time">
+            <input id="newTaskTime" type="time" value="${escapeHtml(interpreted?(draft.time||""):"")}">
           </label>
           <label class="form-field full">
             <span>Location</span>
-            <input id="newTaskLocation" type="text" maxlength="120" placeholder="Optional">
+            <input id="newTaskLocation" type="text" maxlength="120" placeholder="Optional" value="${escapeHtml(interpreted?(draft.location||""):"")}">
           </label>
           <label class="form-field full">
             <span>Description</span>
-            <textarea id="newTaskDescription" rows="4" maxlength="1200" placeholder="Optional notes about the task"></textarea>
+            <textarea id="newTaskDescription" rows="4" maxlength="1200" placeholder="Optional notes about the task">${escapeHtml(interpreted?(draft.description||""):"")}</textarea>
           </label>
         </div>
 
         <div class="create-task-note">
-          ${addToday
-            ?"Today is preselected. If you leave Start time blank, the item will appear in Today as an ANY-time task."
-            :"Leave Scheduled date blank if you want this to remain an open unscheduled task."}
+          ${interpreted
+            ?"This proposal came from natural-language interpretation. Review every field before creating it."
+            :(addToday
+              ?"Today is preselected. If you leave Start time blank, the item will appear in Today as an ANY-time task."
+              :"Leave Scheduled date blank if you want this to remain an open unscheduled task.")}
         </div>
 
         <div class="capture-primary">
@@ -1048,7 +1159,7 @@ function capture(){
   }
 
   const left=`<section class="capture-hero"><span class="eyebrow">CAPTURE</span><h1 class="page-title">Get it out of your head.</h1><p class="page-subtitle">Type naturally. Op-Sym should structure the next step after you capture it.</p></section>`;
-  const right=`<section class="section white"><div class="capture-box"><textarea id="captureText" placeholder="e.g. Meet Gilbert tomorrow at 10 am to review the KROS frontend..."></textarea><div class="capture-primary"><button class="interpret" data-demo="interpret">Interpret & schedule</button><button class="inbox" data-demo="inbox-only">Inbox only</button></div><div class="shortcut-grid">
+  const right=`<section class="section white"><div class="capture-box"><textarea id="captureText" placeholder="e.g. Meet Gilbert tomorrow at 10 am to review the KROS frontend..."></textarea><div class="capture-primary"><button class="interpret" data-interpret-capture>Interpret & schedule</button><button class="inbox" data-demo="inbox-only">Inbox only</button></div><div class="shortcut-grid">
     <button class="shortcut" data-start-task-form>${icon("task")}<strong>Task</strong></button>
     <button class="shortcut" data-demo="event">${icon("calendar")}<strong>Event</strong></button>
     <button class="shortcut" data-demo="commitment">${icon("target")}<strong>Commitment</strong></button>
@@ -1218,6 +1329,11 @@ function bindDynamic(){
   document.querySelectorAll("[data-task-filter]").forEach(btn=>btn.addEventListener("click",()=>{
     activeTaskFilter=btn.dataset.taskFilter || "all";
     if(currentRoute()==="tasks") render("tasks",true);
+  }));
+
+  document.querySelectorAll("[data-interpret-capture]").forEach(btn=>btn.addEventListener("click",e=>{
+    e.preventDefault();
+    interpretCaptureText();
   }));
 
   document.getElementById("newTaskForm")?.addEventListener("submit",e=>{
