@@ -972,3 +972,5 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
   .capture-review-overlay{align-items:center}
   .capture-review-sheet{max-height:90vh;border-radius:22px}
 }
+
+/* v1.7.1: transport/request fix only. No visual redesign. */

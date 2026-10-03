@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.7 - NATURAL LANGUAGE CAPTURE
+   Mobile Backend Integration v1.7.1 - NATURAL LANGUAGE REQUEST FIX
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -120,12 +120,16 @@ function clearMobileBridgeConfig(){
   liveTaskDetailLoading=false;
 }
 
-function jsonpRequest(url,params,timeoutMs=9000){
+function jsonpRequest(url,params,timeoutMs=9000,requestLabel="Op-Sym"){
   return new Promise((resolve,reject)=>{
     const cb="__opsym_cb_"+Date.now()+"_"+Math.random().toString(36).slice(2);
     const script=document.createElement("script");
     let finished=false;
-    const timer=setTimeout(()=>finish(new Error("Home data request timed out.")),timeoutMs);
+    const label=String(requestLabel||"Op-Sym").trim();
+    const timer=setTimeout(
+      ()=>finish(new Error(`${label} request timed out after ${Math.round(timeoutMs/1000)} seconds.`)),
+      timeoutMs
+    );
 
     function finish(err,value){
       if(finished)return;
@@ -141,9 +145,22 @@ function jsonpRequest(url,params,timeoutMs=9000){
     script.src=url+"?"+q.toString();
     script.async=true;
     script.referrerPolicy="no-referrer";
-    script.onerror=()=>finish(new Error("Could not reach the Op-Sym Mobile Bridge."));
+    script.onerror=()=>finish(new Error(`${label} could not reach the Op-Sym Mobile Bridge.`));
     document.head.appendChild(script);
   });
+}
+
+function utf8ToBase64Url(value){
+  const bytes=new TextEncoder().encode(String(value||""));
+  let binary="";
+  const chunk=0x8000;
+  for(let i=0;i<bytes.length;i+=chunk){
+    binary+=String.fromCharCode(...bytes.subarray(i,i+chunk));
+  }
+  return btoa(binary)
+    .replace(/\+/g,"-")
+    .replace(/\//g,"_")
+    .replace(/=+$/,"");
 }
 
 async function loadLiveHomeData(showFailureToast=false){
@@ -314,10 +331,18 @@ async function interpretCaptureText(){
 
   captureInterpretInFlight=true;
   try{
-    const params={action:"interpret-capture",text:textValue};
+    const params={
+      action:"interpret-capture",
+      text64:utf8ToBase64Url(textValue)
+    };
     if(mobileBridge.key) params.key=mobileBridge.key;
 
-    const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
+    const payload=await jsonpRequest(
+      mobileBridge.endpoint,
+      params,
+      30000,
+      "Interpretation"
+    );
     if(!payload || payload.ok!==true){
       throw new Error(payload?.error || "The capture could not be interpreted.");
     }
