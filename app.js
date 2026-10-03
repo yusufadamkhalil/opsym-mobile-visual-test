@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.7.1 - NATURAL LANGUAGE REQUEST FIX
+   Mobile Backend Integration v1.7.2 - LOCAL NATURAL LANGUAGE INTERPRETATION
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -75,6 +75,7 @@ let captureEntryMode = "general";
 let createTaskInFlight = false;
 let captureInterpretInFlight = false;
 let interpretedCaptureDraft = null;
+let localInterpreterReady = true;
 
 const mobileBridge = {
   endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
@@ -150,18 +151,7 @@ function jsonpRequest(url,params,timeoutMs=9000,requestLabel="Op-Sym"){
   });
 }
 
-function utf8ToBase64Url(value){
-  const bytes=new TextEncoder().encode(String(value||""));
-  let binary="";
-  const chunk=0x8000;
-  for(let i=0;i<bytes.length;i+=chunk){
-    binary+=String.fromCharCode(...bytes.subarray(i,i+chunk));
-  }
-  return btoa(binary)
-    .replace(/\+/g,"-")
-    .replace(/\//g,"_")
-    .replace(/=+$/,"");
-}
+
 
 async function loadLiveHomeData(showFailureToast=false){
   if(!mobileBridge.endpoint) return false;
@@ -323,6 +313,12 @@ async function interpretCaptureText(){
 
   const box=document.getElementById("captureText");
   const textValue=box?.value.trim() || "";
+
+  if(!localInterpreterReady){
+    alert("The local interpretation engine did not pass its self-test. Reload the latest Op-Sym build.");
+    return false;
+  }
+
   if(!textValue){
     alert("Type or paste something for Op-Sym to interpret.");
     box?.focus();
@@ -331,23 +327,7 @@ async function interpretCaptureText(){
 
   captureInterpretInFlight=true;
   try{
-    const params={
-      action:"interpret-capture",
-      text64:utf8ToBase64Url(textValue)
-    };
-    if(mobileBridge.key) params.key=mobileBridge.key;
-
-    const payload=await jsonpRequest(
-      mobileBridge.endpoint,
-      params,
-      30000,
-      "Interpretation"
-    );
-    if(!payload || payload.ok!==true){
-      throw new Error(payload?.error || "The capture could not be interpreted.");
-    }
-
-    interpretedCaptureDraft=payload.data || null;
+    interpretedCaptureDraft=interpretCaptureLocally(textValue);
     showCaptureReviewSheet(interpretedCaptureDraft);
     return true;
   }catch(err){
@@ -356,6 +336,190 @@ async function interpretCaptureText(){
   }finally{
     captureInterpretInFlight=false;
   }
+}
+
+
+function interpretCaptureLocally(sourceText){
+  const source=String(sourceText||"").trim();
+  if(!source) throw new Error("Enter something to interpret.");
+
+  const now=new Date();
+  const warnings=[];
+  const detected=[];
+
+  let dateObj=null;
+  let time="";
+  let plannedHours="";
+  let priority="Medium";
+  let role="";
+  let location="";
+
+  if(/\btoday\b/i.test(source)){
+    dateObj=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+    detected.push("today");
+  }else if(/\btomorrow\b/i.test(source)){
+    dateObj=new Date(now.getFullYear(),now.getMonth(),now.getDate()+1);
+    detected.push("tomorrow");
+  }else{
+    const iso=source.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+    if(iso){
+      const y=Number(iso[1]),m=Number(iso[2]),d=Number(iso[3]);
+      const candidate=new Date(y,m-1,d);
+      if(candidate.getFullYear()===y && candidate.getMonth()===m-1 && candidate.getDate()===d){
+        dateObj=candidate;
+        detected.push("explicit date");
+      }
+    }
+
+    if(!dateObj){
+      const slash=source.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](20\d{2}))?\b/);
+      if(slash){
+        const d=Number(slash[1]),m=Number(slash[2]);
+        const y=slash[3]?Number(slash[3]):now.getFullYear();
+        const candidate=new Date(y,m-1,d);
+        if(candidate.getFullYear()===y && candidate.getMonth()===m-1 && candidate.getDate()===d){
+          const todayStart=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+          if(!slash[3] && candidate<todayStart) candidate.setFullYear(y+1);
+          dateObj=candidate;
+          detected.push("calendar date");
+        }
+      }
+    }
+
+    if(!dateObj){
+      const weekdays=["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
+      for(let i=0;i<weekdays.length;i++){
+        const re=new RegExp("\\b(?:next\\s+)?"+weekdays[i]+"\\b","i");
+        if(!re.test(source)) continue;
+        const current=now.getDay();
+        let delta=(i-current+7)%7;
+        if(delta===0) delta=7;
+        const nextRe=new RegExp("\\bnext\\s+"+weekdays[i]+"\\b","i");
+        if(nextRe.test(source) && delta<7) delta+=7;
+        dateObj=new Date(now.getFullYear(),now.getMonth(),now.getDate()+delta);
+        detected.push(weekdays[i]);
+        break;
+      }
+    }
+  }
+
+  let tm=source.match(/\b(?:at|@)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+  if(tm){
+    let hh=Number(tm[1]);
+    const mm=Number(tm[2]||0);
+    const ap=tm[3].toLowerCase();
+    if(hh>=1 && hh<=12 && mm<=59){
+      if(ap==="pm" && hh!==12) hh+=12;
+      if(ap==="am" && hh===12) hh=0;
+      time=String(hh).padStart(2,"0")+":"+String(mm).padStart(2,"0");
+      detected.push("time");
+    }
+  }
+
+  if(!time){
+    tm=source.match(/\b(?:at|@)\s*([01]?\d|2[0-3]):([0-5]\d)\b/i);
+    if(tm){
+      time=String(Number(tm[1])).padStart(2,"0")+":"+tm[2];
+      detected.push("time");
+    }
+  }
+
+  if(!time){
+    tm=source.match(/\b(?:at|@)\s*(\d{1,2})(?![:\d])\b/i);
+    if(tm){
+      const hh=Number(tm[1]);
+      if(hh>=0 && hh<=23){
+        time=String(hh).padStart(2,"0")+":00";
+        warnings.push("Time was interpreted in 24-hour format because AM/PM was not stated.");
+        detected.push("time");
+      }
+    }
+  }
+
+  let dur=source.match(/\bfor\s+(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr)\b/i);
+  if(dur){
+    plannedHours=Number(dur[1]);
+    detected.push("duration");
+  }else{
+    dur=source.match(/\bfor\s+(\d+)\s*(?:minutes?|mins?|min)\b/i);
+    if(dur){
+      plannedHours=Math.round((Number(dur[1])/60)*100)/100;
+      detected.push("duration");
+    }else if(/\bfor\s+(?:an?|one)\s+hour\b/i.test(source)){
+      plannedHours=1;
+      detected.push("duration");
+    }else if(/\bfor\s+half\s+(?:an?\s+)?hour\b/i.test(source)){
+      plannedHours=.5;
+      detected.push("duration");
+    }
+  }
+
+  if(/\b(urgent|asap|immediately)\b/i.test(source)) priority="Urgent";
+  else if(/\bhigh priority\b/i.test(source)) priority="High";
+  else if(/\blow priority\b/i.test(source)) priority="Low";
+
+  const roleMatch=source.match(/\brole\s*[:\-]\s*([a-z][a-z \-&]{2,40})/i);
+  if(roleMatch) role=roleMatch[1].trim();
+
+  const locMatch=source.match(/\b(?:location|venue)\s*[:\-]\s*([^,.;]{2,80})/i);
+  if(locMatch) location=locMatch[1].trim();
+
+  let title=source
+    .replace(/\b(today|tomorrow)\b/ig," ")
+    .replace(/\bnext\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig," ")
+    .replace(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig," ")
+    .replace(/\b20\d{2}-\d{2}-\d{2}\b/g," ")
+    .replace(/\b\d{1,2}[\/\-]\d{1,2}(?:[\/\-]20\d{2})?\b/g," ")
+    .replace(/\b(?:at|@)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b/ig," ")
+    .replace(/\bfor\s+(?:\d+(?:\.\d+)?|an?|one|half)\s*(?:hours?|hrs?|hr|minutes?|mins?|min|(?:an?\s+)?hour)\b/ig," ")
+    .replace(/\b(?:urgent|asap|immediately|high priority|low priority)\b/ig," ")
+    .replace(/\brole\s*[:\-]\s*[a-z][a-z \-&]{2,40}/ig," ")
+    .replace(/\b(?:location|venue)\s*[:\-]\s*[^,.;]{2,80}/ig," ")
+    .replace(/\s+/g," ")
+    .replace(/^[,.;:\-\s]+|[,.;:\-\s]+$/g,"")
+    .trim();
+
+  if(!title) title=source;
+
+  if(time && !dateObj){
+    warnings.push("A time was found but no date was found. Choose a date before creating the task.");
+  }
+  if(dateObj && !time){
+    warnings.push("A date was found but no start time was found. The task can be created as an ANY-time item.");
+  }
+  if(!plannedHours && time){
+    warnings.push("No duration was found. Add Planned hours if you want conflict checking.");
+  }
+
+  let confidence=.55;
+  if(title) confidence+=.15;
+  if(dateObj) confidence+=.10;
+  if(time) confidence+=.10;
+  if(plannedHours) confidence+=.05;
+  if(warnings.length===0) confidence+=.05;
+  confidence=Math.min(.95,Math.round(confidence*100)/100);
+
+  const date=dateObj
+    ? `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,"0")}-${String(dateObj.getDate()).padStart(2,"0")}`
+    : "";
+
+  return {
+    sourceText:source,
+    title, role, project:"", priority, plannedHours, date, time, location,
+    description:source,
+    confidence,
+    confidenceLabel:confidence>=.85?"High":(confidence>=.70?"Medium":"Needs review"),
+    warnings, detected, requiresReview:true, interpreter:"local-v1.7.2"
+  };
+}
+
+function runLocalInterpreterSelfTest(){
+  const sample=interpretCaptureLocally("Meet Gilbert tomorrow at 10 am for one hour");
+  return !!sample &&
+    sample.title==="Meet Gilbert" &&
+    !!sample.date &&
+    sample.time==="10:00" &&
+    Number(sample.plannedHours)===1;
 }
 
 function captureReviewRow(label,value){
@@ -1427,6 +1591,13 @@ window.addEventListener("popstate",()=>render(location.hash.replace("#","")||"ho
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>render(location.hash.replace("#","")||"home",true));
 
 runBackendSetupFromQuery();
+
+try{
+  localInterpreterReady=runLocalInterpreterSelfTest();
+}catch(_){
+  localInterpreterReady=false;
+}
+
 render(location.hash.replace("#","")||"home",true);
 loadLiveHomeData(false);
 loadLiveTodayData(false);
