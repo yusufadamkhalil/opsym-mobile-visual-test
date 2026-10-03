@@ -603,3 +603,11 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
   .task-detail-tabs{position:sticky;top:0;background:#fff;z-index:2;padding-top:2px}
   .detail-list-row{grid-template-columns:minmax(130px,34%) minmax(0,66%)}
 }
+
+
+/* Mobile Backend v1.4 - controlled action feedback only */
+.task-actions button:disabled{
+  opacity:.55;
+  cursor:wait;
+  pointer-events:none;
+}

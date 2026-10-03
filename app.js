@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.3 - HOME + TODAY + TASKS + TASK DETAIL
+   Mobile Backend Integration v1.4 - CONTROLLED COMPLETE
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -69,6 +69,7 @@ let liveTaskDetailLoaded = false;
 let liveTaskDetailLoading = false;
 let liveTaskDetailError = null;
 let activeTaskDetailTab = "details";
+let completeActionInFlight = false;
 
 const mobileBridge = {
   endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
@@ -235,6 +236,63 @@ async function loadLiveTaskDetailData(taskId,showFailureToast=false){
   }
 }
 
+
+async function completeTaskById(taskId,title=""){
+  const id=String(taskId||"").trim();
+  if(!id || completeActionInFlight) return false;
+
+  const label=String(title||id).trim();
+  const ok=confirm(
+    `Complete this task?\n\n${label}\n${id}\n\nThis will set Status to Completed and % Complete to 100%.`
+  );
+  if(!ok) return false;
+
+  completeActionInFlight=true;
+  try{
+    const params={action:"complete-task",taskId:id};
+    if(mobileBridge.key) params.key=mobileBridge.key;
+
+    const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
+    if(!payload || payload.ok!==true){
+      throw new Error(payload?.error || "The task could not be completed.");
+    }
+
+    const result=payload.data || {};
+    toast(result.changed===false ? "Task was already closed" : "Task completed");
+
+    // Refresh every live surface that can be affected by completion.
+    liveHomeLoaded=false;
+    liveTodayLoaded=false;
+    liveTasksLoaded=false;
+    liveTaskDetailLoaded=false;
+    liveTaskDetailData=null;
+    liveTaskDetailError=null;
+
+    await Promise.all([
+      loadLiveHomeData(false),
+      loadLiveTodayData(false),
+      loadLiveTasksData(false)
+    ]);
+
+    // A completed task disappears from open Tasks/Today, so return there
+    // rather than leaving a stale detail page onscreen.
+    if(currentRoute()==="task-detail"){
+      selectedTaskId="";
+      activeTaskDetailTab="details";
+      render("tasks",true);
+    }else if(currentRoute()==="tasks"){
+      render("tasks",true);
+    }
+
+    return true;
+  }catch(err){
+    alert("Could not complete task:\n"+(err?.message || err));
+    return false;
+  }finally{
+    completeActionInFlight=false;
+  }
+}
+
 function detailValue(value,fallback="—"){
   const s=String(value==null?"":value).trim();
   return escapeHtml(s || fallback);
@@ -373,7 +431,7 @@ function taskCards(){
 
   return items.map(t=>`<article class="task-card">
     <div class="task-top"><div><h3>${escapeHtml(t.title)}</h3><div class="meta">${escapeHtml(t.meta || "")}</div></div><span class="pill">${escapeHtml(t.status || "Open")}</span></div>
-    <div class="task-actions"><button class="done" data-demo="completed">Complete</button><button data-route="task-detail" data-task-id="${escapeHtml(t.taskId || "")}">Details</button></div>
+    <div class="task-actions"><button class="done" data-complete-task="${escapeHtml(t.taskId || "")}" data-task-title="${escapeHtml(t.title || "")}">Complete</button><button data-route="task-detail" data-task-id="${escapeHtml(t.taskId || "")}">Details</button></div>
   </article>`).join("");
 }
 function inboxRows(){
@@ -649,7 +707,7 @@ function taskDetail(){
     </div>
     <div class="task-detail-tab-content">${content}</div>
     <div class="task-actions" style="margin-top:14px">
-      <button class="done" data-demo="complete-task">Complete</button>
+      <button class="done" data-complete-task="${escapeHtml(t.taskId)}" data-task-title="${escapeHtml(t.title)}">Complete</button>
       <button data-demo="reschedule">Reschedule</button>
       <button data-demo="more-actions">More</button>
     </div>
@@ -725,6 +783,12 @@ function bindDynamic(){
   document.querySelectorAll("[data-task-filter]").forEach(btn=>btn.addEventListener("click",()=>{
     activeTaskFilter=btn.dataset.taskFilter || "all";
     if(currentRoute()==="tasks") render("tasks",true);
+  }));
+
+  document.querySelectorAll("[data-complete-task]").forEach(btn=>btn.addEventListener("click",e=>{
+    e.preventDefault();
+    e.stopPropagation();
+    completeTaskById(btn.dataset.completeTask,btn.dataset.taskTitle || "");
   }));
 
   document.querySelectorAll("[data-task-detail-tab]").forEach(btn=>btn.addEventListener("click",()=>{
