@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.7.2 - LOCAL NATURAL LANGUAGE INTERPRETATION
+   Mobile Backend Integration v1.7.3 - RELIABLE TASK CREATION
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -591,6 +591,59 @@ function closeCaptureReviewSheet(){
   document.getElementById("captureReviewOverlay")?.remove();
 }
 
+
+function createClientRequestId(){
+  try{
+    if(globalThis.crypto?.randomUUID){
+      return "create-"+crypto.randomUUID();
+    }
+  }catch(_){}
+
+  return "create-"+Date.now().toString(36)+"-"+Math.random().toString(36).slice(2,14);
+}
+
+function isRequestTimeoutError(err){
+  const msg=String(err?.message || err || "").toLowerCase();
+  return msg.includes("timed out");
+}
+
+async function checkCreateRequestStatus(requestId){
+  const params={action:"create-status",requestId};
+  if(mobileBridge.key) params.key=mobileBridge.key;
+
+  const payload=await jsonpRequest(
+    mobileBridge.endpoint,
+    params,
+    15000,
+    "Task creation status"
+  );
+
+  if(!payload || payload.ok!==true){
+    throw new Error(payload?.error || "Could not confirm task creation status.");
+  }
+
+  return payload.data || {};
+}
+
+async function finishSuccessfulTaskCreation(result){
+  toast(`Created ${result.taskId || "task"}`);
+
+  liveHomeLoaded=false;
+  liveTodayLoaded=false;
+  liveTasksLoaded=false;
+
+  await Promise.all([
+    loadLiveHomeData(false),
+    loadLiveTodayData(false),
+    loadLiveTasksData(false)
+  ]);
+
+  const destination=captureEntryMode==="today" ? "today" : "tasks";
+  captureEntryMode="general";
+  interpretedCaptureDraft=null;
+  render(destination,true);
+}
+
 async function createTaskFromForm(){
   if(createTaskInFlight) return false;
 
@@ -626,21 +679,64 @@ async function createTaskFromForm(){
   );
   if(!confirmed) return false;
 
+  const requestId=createClientRequestId();
   createTaskInFlight=true;
+
   try{
     const params={
       action:"create-task",
+      requestId,
       title,role,project,priority,
       plannedHours,date,time,location,description
     };
     if(mobileBridge.key) params.key=mobileBridge.key;
 
-    const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
+    let payload;
+
+    try{
+      payload=await jsonpRequest(
+        mobileBridge.endpoint,
+        params,
+        30000,
+        "Task creation"
+      );
+    }catch(err){
+      if(!isRequestTimeoutError(err)) throw err;
+
+      // A timeout is not treated as a failed write.
+      // Ask the bridge whether this exact request was already committed.
+      let status;
+      try{
+        status=await checkCreateRequestStatus(requestId);
+      }catch(statusErr){
+        alert(
+          "Task creation could not be confirmed.\n\n"+
+          "Do not press Create again yet.\n"+
+          "Request ID: "+requestId+"\n\n"+
+          "The app could not verify whether the backend completed the write."
+        );
+        return false;
+      }
+
+      if(status.created){
+        await finishSuccessfulTaskCreation(status);
+        return true;
+      }
+
+      alert(
+        "Task creation timed out and no verified task was found.\n\n"+
+        "No duplicate retry was made.\n"+
+        "Request ID: "+requestId
+      );
+      return false;
+    }
+
     if(!payload || payload.ok!==true){
       throw new Error(payload?.error || "The task could not be created.");
     }
 
     const result=payload.data || {};
+
     if(result.blocked){
       alert(
         "This time conflicts with existing work.\n\n"+
@@ -650,23 +746,13 @@ async function createTaskFromForm(){
       return false;
     }
 
-    toast(`Created ${result.taskId || "task"}`);
+    if(!result.created){
+      throw new Error(result.message || "The task was not verified as created.");
+    }
 
-    liveHomeLoaded=false;
-    liveTodayLoaded=false;
-    liveTasksLoaded=false;
-
-    await Promise.all([
-      loadLiveHomeData(false),
-      loadLiveTodayData(false),
-      loadLiveTasksData(false)
-    ]);
-
-    const destination=captureEntryMode==="today" ? "today" : "tasks";
-    captureEntryMode="general";
-    interpretedCaptureDraft=null;
-    render(destination,true);
+    await finishSuccessfulTaskCreation(result);
     return true;
+
   }catch(err){
     alert("Could not create task:\n"+(err?.message || err));
     return false;
