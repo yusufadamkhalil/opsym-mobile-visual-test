@@ -1000,3 +1000,36 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
 .inbox-topline{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}.commitment-pill{display:inline-flex;align-items:center;min-height:26px;padding:4px 9px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:.05em;background:#F1F5F9;color:#334155}.inbox-actions{display:flex;flex-wrap:wrap;gap:8px}.inbox-actions button{min-height:40px}.live-inbox-row .meta{margin:8px 0;color:#64748B;font-size:12px}
 
 .inbox-actions.one-action{display:flex;justify-content:flex-end}.choice-strip{display:flex;gap:8px;flex-wrap:wrap}.choice-strip.five{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.choice-chip,.commitment-filter{min-height:44px;border:1px solid #d8e1ec;border-radius:13px;background:#fff;padding:9px 11px;font:inherit;font-weight:800}.choice-chip.selected,.commitment-filter.active{border-color:#0F52FF;background:#EAF2FF}.clarify-group{margin:16px 0}.clarify-label{display:block;margin-bottom:8px;font-size:12px;font-weight:800;color:#64748B}.clarify-help{font-size:13px;color:#64748B}.commitment-filter-strip{display:flex;gap:8px;overflow-x:auto;padding-bottom:14px}.commitment-filter{flex:0 0 auto}
+
+
+/* v1.8.1.1 Inbox Clarify UI Hotfix
+   Must come after legacy .inbox-actions button rules. */
+.inbox-actions.one-action .inbox-clarify-btn{
+  min-height:46px;
+  min-width:112px;
+  padding:0 20px;
+  border:1px solid var(--blue);
+  border-radius:13px;
+  background:var(--blue);
+  color:#fff;
+  font:inherit;
+  font-weight:800;
+  line-height:1;
+  opacity:1;
+  visibility:visible;
+  cursor:pointer;
+  -webkit-tap-highlight-color:transparent;
+}
+.inbox-actions.one-action .inbox-clarify-btn span{
+  display:inline-block;
+  color:#fff;
+  opacity:1;
+  visibility:visible;
+}
+.inbox-actions.one-action .inbox-clarify-btn:hover,
+.inbox-actions.one-action .inbox-clarify-btn:focus-visible,
+.inbox-actions.one-action .inbox-clarify-btn:active{
+  background:var(--blue);
+  border-color:var(--blue);
+  color:#fff;
+}
