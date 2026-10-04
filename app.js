@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.7.3 - RELIABLE TASK CREATION
+   Mobile Backend Integration v1.7.4 - RELIABLE WRITE GATEWAY
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -607,14 +607,121 @@ function isRequestTimeoutError(err){
   return msg.includes("timed out");
 }
 
-async function checkCreateRequestStatus(requestId){
+
+function submitBridgePost(params){
+  if(!mobileBridge.endpoint){
+    throw new Error("Mobile Bridge is not configured.");
+  }
+
+  const iframeName="opsymWriteFrame_"+Date.now()+"_"+Math.random().toString(36).slice(2);
+  const iframe=document.createElement("iframe");
+  iframe.name=iframeName;
+  iframe.title="Op-Sym write gateway";
+  iframe.setAttribute("aria-hidden","true");
+  iframe.tabIndex=-1;
+  iframe.style.display="none";
+
+  const form=document.createElement("form");
+  form.method="POST";
+  form.action=mobileBridge.endpoint;
+  form.target=iframeName;
+  form.acceptCharset="UTF-8";
+  form.style.display="none";
+
+  Object.entries(params || {}).forEach(([key,value])=>{
+    if(value===undefined || value===null) return;
+    const input=document.createElement("input");
+    input.type="hidden";
+    input.name=key;
+    input.value=String(value);
+    form.appendChild(input);
+  });
+
+  document.body.appendChild(iframe);
+  document.body.appendChild(form);
+
+  try{
+    form.submit();
+  }catch(err){
+    form.remove();
+    iframe.remove();
+    throw err;
+  }
+
+  // The response is cross-origin and intentionally not read.
+  // Cleanup after enough time for Apps Script to receive the form.
+  setTimeout(()=>{
+    form.remove();
+    iframe.remove();
+  },60000);
+}
+
+async function waitForCreateRequestStatus(requestId,{
+  timeoutMs=45000,
+  pollMs=1500
+}={}){
+  const deadline=Date.now()+timeoutMs;
+  let lastError=null;
+
+  while(Date.now()<deadline){
+    await new Promise(resolve=>setTimeout(resolve,pollMs));
+
+    try{
+      const status=await checkCreateRequestStatus(requestId,8000);
+
+      if(status.created || status.blocked || status.status==="error"){
+        return status;
+      }
+    }catch(err){
+      lastError=err;
+    }
+  }
+
+  const suffix=lastError ? ` Last status error: ${lastError.message||lastError}` : "";
+  throw new Error(`Task creation acknowledgement timed out after ${Math.round(timeoutMs/1000)} seconds.${suffix}`);
+}
+
+async function testWriteGateway(){
+  const requestId="writeping-"+createClientRequestId().replace(/^create-/,"");
+
+  const params={
+    action:"write-ping",
+    requestId
+  };
+  if(mobileBridge.key) params.key=mobileBridge.key;
+
+  submitBridgePost(params);
+
+  const deadline=Date.now()+20000;
+  while(Date.now()<deadline){
+    await new Promise(resolve=>setTimeout(resolve,1000));
+    const q={action:"write-ping-status",requestId};
+    if(mobileBridge.key) q.key=mobileBridge.key;
+
+    try{
+      const payload=await jsonpRequest(
+        mobileBridge.endpoint,
+        q,
+        6000,
+        "Write gateway diagnostic"
+      );
+      if(payload?.ok===true && payload?.data?.found===true){
+        return true;
+      }
+    }catch(_){}
+  }
+
+  return false;
+}
+
+async function checkCreateRequestStatus(requestId,timeoutMs=8000){
   const params={action:"create-status",requestId};
   if(mobileBridge.key) params.key=mobileBridge.key;
 
   const payload=await jsonpRequest(
     mobileBridge.endpoint,
     params,
-    15000,
+    timeoutMs,
     "Task creation status"
   );
 
@@ -691,51 +798,28 @@ async function createTaskFromForm(){
     };
     if(mobileBridge.key) params.key=mobileBridge.key;
 
-    let payload;
+    // v1.7.4: write payload travels via POST, not JSONP GET.
+    submitBridgePost(params);
 
+    let result;
     try{
-      payload=await jsonpRequest(
-        mobileBridge.endpoint,
-        params,
-        30000,
-        "Task creation"
-      );
+      result=await waitForCreateRequestStatus(requestId,{
+        timeoutMs:45000,
+        pollMs:1500
+      });
     }catch(err){
-      if(!isRequestTimeoutError(err)) throw err;
-
-      // A timeout is not treated as a failed write.
-      // Ask the bridge whether this exact request was already committed.
-      let status;
-      try{
-        status=await checkCreateRequestStatus(requestId);
-      }catch(statusErr){
-        alert(
-          "Task creation could not be confirmed.\n\n"+
-          "Do not press Create again yet.\n"+
-          "Request ID: "+requestId+"\n\n"+
-          "The app could not verify whether the backend completed the write."
-        );
-        return false;
-      }
-
-      if(status.created){
-        await finishSuccessfulTaskCreation(status);
-        return true;
-      }
-
       alert(
-        "Task creation timed out and no verified task was found.\n\n"+
-        "No duplicate retry was made.\n"+
-        "Request ID: "+requestId
+        "Task creation could not be confirmed.\n\n"+
+        "Do not press Create again yet.\n"+
+        "Request ID: "+requestId+"\n\n"+
+        (err?.message || err)
       );
       return false;
     }
 
-    if(!payload || payload.ok!==true){
-      throw new Error(payload?.error || "The task could not be created.");
+    if(result.status==="error"){
+      throw new Error(result.error || result.message || "Task creation failed.");
     }
-
-    const result=payload.data || {};
 
     if(result.blocked){
       alert(
