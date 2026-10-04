@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.8.1.1 - INBOX CLARIFY UI HOTFIX
+   Mobile Backend Integration v1.8.1.3 - CLARIFY FOCUS MODAL HOTFIX
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -79,6 +79,7 @@ let liveInboxLoaded=false, liveInboxLoading=false, liveInboxData=null, liveInbox
 let liveCommitmentsLoaded=false, liveCommitmentsLoading=false, liveCommitmentsData=null, liveCommitmentsError=null;
 let inboxCaptureInFlight=false, commitmentActionInFlight=false;
 let activeCommitmentFilter="ALL";
+let clarifyReturnFocusEl=null;
 let localInterpreterReady = true;
 
 const mobileBridge = {
@@ -1001,11 +1002,209 @@ async function finishSuccessfulTaskCreation(result){
 function getInboxItem(id){return (liveInboxData?.items||[]).find(x=>x.inboxId===id)||null;}
 function buildInboxDraft(text){const s=interpretCaptureLocally(text),c=classifyCommitmentLocally(text,s),personName=c.counterparty||s.personName||"",intent=["WAIT","DELEGATE","DECIDE"].includes(c.commitmentType)?c.commitmentType:(c.commitmentType==="MEET"?"MEET":s.intent);let plannedHours=s.plannedHours;if(c.commitmentType==="WAIT"||c.commitmentType==="DELEGATE")plannedHours="";return{...s,...c,personName,intent,plannedHours,combinedConfidence:Math.round(((Number(s.confidence||0)+Number(c.commitmentConfidence||0))/2)*100)/100};}
 async function captureToInbox(text){if(inboxCaptureInFlight)return false;text=String(text||"").trim();if(!text){alert("Enter something to capture.");return false;}const d=buildInboxDraft(text);try{await loadLiveInboxData(true);}catch(_){}const norm=v=>String(v||"").toLowerCase().replace(/[^\p{L}\p{N}]+/gu," ").replace(/\s+/g," ").trim(),sim=(x,y)=>{const A=new Set(norm(x).split(" ").filter(Boolean)),B=new Set(norm(y).split(" ").filter(Boolean));if(!A.size||!B.size)return 0;let n=0;A.forEach(t=>{if(B.has(t))n++;});return n/new Set([...A,...B]).size;};let dup=null,score=0;for(const x of(liveInboxData?.items||[])){const q=sim(text,x.rawText||"");if(q>score){score=q;dup=x;}}if(score>=.72&&!confirm(`This looks ${norm(dup.rawText)===norm(text)?"the same as":"very similar to"} ${dup.inboxId}.\n\nPress OK only if this is intentionally a separate occurrence.`)){render("inbox",true);return false;}if(!confirm(`Capture this to Inbox?\n\n${d.title}\n\nType: ${d.commitmentType}\nDirection: ${d.direction}\nPerson: ${d.personName||"Not resolved"}\nDate: ${d.date||"Not resolved"}\nTime: ${d.time||"Not resolved"}`))return false;inboxCaptureInFlight=true;try{let r=await submitMutationAndWait("capture-inbox",{rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",parserVersion:"semantic-local-v2.0+commitment-local-v1.1",forceDuplicate:String(score>=.72),source:"mobile_inbox_capture"});if(r.status==="duplicate"){if(!confirm(`A matching open Inbox item already exists: ${r.existing?.inboxId||"existing item"}.\n\nPress OK to capture another separate copy.`)){liveInboxLoaded=false;await loadLiveInboxData(false);render("inbox",true);return false;}r=await submitMutationAndWait("capture-inbox",{rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",forceDuplicate:"true",source:"mobile_inbox_capture"});}if(r.status!=="captured")throw new Error(r.error||r.message||"Inbox capture was not confirmed.");liveInboxLoaded=false;await loadLiveInboxData(false);render("inbox",true);return true;}catch(err){alert("Could not capture to Inbox:\n"+(err?.message||err));return false;}finally{inboxCaptureInFlight=false;}}
-function openInboxClarifySheet(id){const x=getInboxItem(id);if(!x)return;const el=document.createElement("div");el.className="smart-sheet-backdrop";el.id="inboxClarifyBackdrop";el.innerHTML=`<section class="smart-sheet"><div class="smart-sheet-head"><div><span class="eyebrow">CLARIFY · ${escapeHtml(id)}</span><h2>Confirm what this means.</h2></div><button class="icon-btn" data-close-inbox-clarify>×</button></div><div class="inbox-raw-box">${escapeHtml(x.rawText||"")}</div><label class="form-field full"><span>Title</span><input id="clarifyTitle" value="${escapeHtml(x.title||x.rawText||"")}"></label><div class="clarify-group"><span class="clarify-label">Commitment classification</span><div class="choice-strip five">${["DO","MEET","WAIT","DELEGATE","DECIDE"].map(c=>`<button type="button" class="choice-chip ${c===String(x.commitmentType||"DO").toUpperCase()?"selected":""}" data-clarify-type="${c}">${c}</button>`).join("")}</div></div><div class="clarify-group"><span class="clarify-label">Who owns the next move?</span><div class="choice-strip">${["ME","OTHER","SHARED"].map(c=>`<button type="button" class="choice-chip ${c===String(x.direction||"ME").toUpperCase()?"selected":""}" data-clarify-direction="${c}">${c}</button>`).join("")}</div></div><div class="form-grid"><label class="form-field"><span>Person</span><input id="clarifyPerson" value="${escapeHtml(x.personName||"")}"></label><label class="form-field"><span>Location</span><input id="clarifyLocation" value="${escapeHtml(x.locationName||"")}"></label><label class="form-field"><span>Date</span><input id="clarifyDate" type="date" value="${escapeHtml(x.date||"")}"></label><label class="form-field"><span>Time</span><input id="clarifyTime" type="time" value="${escapeHtml(x.time||"")}"></label><label class="form-field"><span>Planned hours</span><input id="clarifyHours" type="number" step=".25" value="${escapeHtml(x.plannedHours||"")}"></label><label class="form-field"><span>Intent</span><input id="clarifyIntent" value="${escapeHtml(x.intent||x.commitmentType||"TASK")}"></label></div><p id="clarifyOwnershipHelp" class="clarify-help"></p><div class="smart-sheet-actions"><button class="ghost-btn" data-clarify-task="${id}">Create Task</button><button class="primary-btn" data-clarify-commitment="${id}">Create Commitment</button></div><button class="text-btn" data-clarify-dismiss="${id}">Dismiss</button></section>`;document.body.appendChild(el);updateClarifyRules();}
-function closeInboxClarifySheet(){document.getElementById("inboxClarifyBackdrop")?.remove();}
+function clarifySummaryText(x){
+  const parts=[
+    String(x.commitmentType||"DO").toUpperCase(),
+    String(x.direction||"ME").toUpperCase(),
+    x.personName||"",
+    x.date||"",
+    x.time||""
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function openInboxClarifySheet(id){
+  const x=getInboxItem(id);
+  if(!x) return;
+
+  clarifyReturnFocusEl=document.querySelector(`[data-inbox-clarify="${CSS.escape(String(id))}"]`) || document.activeElement;
+  document.getElementById("inboxClarifyBackdrop")?.remove();
+
+  const el=document.createElement("div");
+  el.className="smart-sheet-backdrop";
+  el.id="inboxClarifyBackdrop";
+
+  const type=String(x.commitmentType||"DO").toUpperCase();
+  const direction=String(x.direction||"ME").toUpperCase();
+  const hours=(type==="WAIT"||type==="DELEGATE")?"":(x.plannedHours||"");
+
+  el.innerHTML=`
+    <section class="smart-sheet clarify-workspace" role="dialog" aria-modal="true" aria-label="Review and classify Inbox item" tabindex="-1">
+      <div class="smart-sheet-handle"></div>
+
+      <header class="clarify-sticky-header">
+        <div class="smart-sheet-head">
+          <div>
+            <span class="eyebrow">REVIEW & CLASSIFY · ${escapeHtml(id)}</span>
+            <h2>Confirm what this means.</h2>
+            <p>Review Op-Sym's interpretation, correct anything necessary, then choose what this should become.</p>
+          </div>
+          <button class="icon-btn" type="button" data-close-inbox-clarify aria-label="Close">×</button>
+        </div>
+        <div class="clarify-summary" id="clarifySummary">${escapeHtml(clarifySummaryText(x))}</div>
+      </header>
+
+      <div class="clarify-scroll-body">
+        <section class="clarify-step" aria-labelledby="clarifyStep1">
+          <div class="clarify-step-head">
+            <span class="clarify-step-number">1</span>
+            <div><strong id="clarifyStep1">Classification</strong><small>What kind of open loop is this?</small></div>
+          </div>
+
+          <div class="choice-strip five" role="radiogroup" aria-label="Commitment classification">
+            ${["DO","MEET","WAIT","DELEGATE","DECIDE"].map(c=>`
+              <button type="button"
+                class="choice-chip ${c===type?"selected":""}"
+                data-clarify-type="${c}"
+                aria-pressed="${c===type?"true":"false"}">${c}</button>
+            `).join("")}
+          </div>
+        </section>
+
+        <section class="clarify-step" aria-labelledby="clarifyStep2">
+          <div class="clarify-step-head">
+            <span class="clarify-step-number">2</span>
+            <div><strong id="clarifyStep2">Responsibility</strong><small>Who owns the next move?</small></div>
+          </div>
+
+          <div class="choice-strip" role="radiogroup" aria-label="Responsibility">
+            ${["ME","OTHER","SHARED"].map(c=>`
+              <button type="button"
+                class="choice-chip ${c===direction?"selected":""}"
+                data-clarify-direction="${c}"
+                aria-pressed="${c===direction?"true":"false"}">${c}</button>
+            `).join("")}
+          </div>
+
+          <p id="clarifyOwnershipHelp" class="clarify-help"></p>
+        </section>
+
+        <section class="clarify-step" aria-labelledby="clarifyStep3">
+          <div class="clarify-step-head">
+            <span class="clarify-step-number">3</span>
+            <div><strong id="clarifyStep3">Key details</strong><small>Check the information Op-Sym extracted.</small></div>
+          </div>
+
+          <div class="inbox-raw-box clarify-source-text">
+            <span class="clarify-source-label">Original capture</span>
+            ${escapeHtml(x.rawText||"")}
+          </div>
+
+          <label class="form-field full">
+            <span>Title</span>
+            <input id="clarifyTitle" value="${escapeHtml(x.title||x.rawText||"")}">
+          </label>
+
+          <div class="form-grid clarify-core-fields">
+            <label class="form-field">
+              <span>Person / counterparty</span>
+              <input id="clarifyPerson" value="${escapeHtml(x.personName||"")}">
+            </label>
+            <label class="form-field">
+              <span>Location</span>
+              <input id="clarifyLocation" value="${escapeHtml(x.locationName||"")}">
+            </label>
+            <label class="form-field">
+              <span>Date</span>
+              <input id="clarifyDate" type="date" value="${escapeHtml(x.date||"")}">
+            </label>
+            <label class="form-field">
+              <span>Time</span>
+              <input id="clarifyTime" type="time" value="${escapeHtml(x.time||"")}">
+            </label>
+          </div>
+
+          <details class="clarify-advanced">
+            <summary>More details</summary>
+            <div class="form-grid clarify-advanced-grid">
+              <label class="form-field">
+                <span>Planned hours</span>
+                <input id="clarifyHours" type="number" min="0.25" step=".25" value="${escapeHtml(hours?String(hours):"")}">
+              </label>
+              <label class="form-field">
+                <span>Intent</span>
+                <input id="clarifyIntent" value="${escapeHtml(x.intent||type||"TASK")}">
+              </label>
+            </div>
+          </details>
+        </section>
+      </div>
+
+      <footer class="clarify-sticky-actions" aria-label="Create from clarified item">
+        <div class="clarify-action-caption">What should this become?</div>
+        <div class="clarify-primary-actions">
+          <button class="ghost-btn clarify-final-btn" type="button" data-clarify-task="${escapeHtml(id)}">Create Task</button>
+          <button class="primary-btn clarify-final-btn" type="button" data-clarify-commitment="${escapeHtml(id)}">Create Commitment</button>
+        </div>
+        <button class="text-btn clarify-dismiss-btn" type="button" data-clarify-dismiss="${escapeHtml(id)}">Dismiss from Inbox</button>
+      </footer>
+    </section>`;
+
+  document.body.appendChild(el);
+  document.body.classList.add("opsym-modal-open");
+
+  const scrollBody=el.querySelector(".clarify-scroll-body");
+  if(scrollBody) scrollBody.scrollTop=0;
+
+  updateClarifyRules();
+  updateClarifySummary();
+
+  requestAnimationFrame(()=>{
+    const workspace=el.querySelector(".clarify-workspace");
+    workspace?.focus({preventScroll:true});
+  });
+}
+function closeInboxClarifySheet(){
+  document.getElementById("inboxClarifyBackdrop")?.remove();
+  document.body.classList.remove("opsym-modal-open");
+  const target=clarifyReturnFocusEl;
+  clarifyReturnFocusEl=null;
+  requestAnimationFrame(()=>target?.focus?.({preventScroll:true}));
+}
 function clarifyType(){return document.querySelector("[data-clarify-type].selected")?.dataset.clarifyType||"DO";}
 function clarifyDirection(){return document.querySelector("[data-clarify-direction].selected")?.dataset.clarifyDirection||"ME";}
-function updateClarifyRules(){const t=clarifyType(),h=document.getElementById("clarifyHours"),p=document.getElementById("clarifyOwnershipHelp");if(!h||!p)return;if(t==="WAIT"||t==="DELEGATE"){h.value="";h.disabled=true;p.textContent=t+" means the next move belongs to another person; your duration is not applicable.";}else{h.disabled=false;p.textContent="Correct any proposed value before creating the final object.";}}
+function updateClarifySummary(){
+  const summary=document.getElementById("clarifySummary");
+  if(!summary) return;
+
+  const parts=[
+    clarifyType(),
+    clarifyDirection(),
+    document.getElementById("clarifyPerson")?.value.trim()||"",
+    document.getElementById("clarifyDate")?.value||"",
+    document.getElementById("clarifyTime")?.value||""
+  ].filter(Boolean);
+
+  summary.textContent=parts.join(" · ");
+}
+
+function updateClarifyRules(){
+  const t=clarifyType();
+  const h=document.getElementById("clarifyHours");
+  const p=document.getElementById("clarifyOwnershipHelp");
+  if(!h||!p) return;
+
+  if(t==="WAIT"){
+    h.value="";
+    h.disabled=true;
+    p.textContent="WAIT: another person owns the next move. Op-Sym tracks the expected response, so your own work duration is not required.";
+  }else if(t==="DELEGATE"){
+    h.value="";
+    h.disabled=true;
+    p.textContent="DELEGATE: work has been assigned to someone else. Op-Sym tracks responsibility and follow-up rather than your personal work duration.";
+  }else if(t==="MEET"){
+    h.disabled=false;
+    p.textContent="MEET is normally shared responsibility. Confirm the person, place and time below.";
+  }else if(t==="DECIDE"){
+    h.disabled=false;
+    p.textContent="DECIDE means the next move is a decision you need to make.";
+  }else{
+    h.disabled=false;
+    p.textContent="DO means an action you need to perform. Confirm the key details below.";
+  }
+
+  updateClarifySummary();
+}
 function collectClarify(id){const x=getInboxItem(id);return{inboxId:id,inboxUuid:x.objectUuid||"",rawText:x.rawText||"",title:document.getElementById("clarifyTitle")?.value.trim()||x.title||"",commitmentType:clarifyType(),direction:clarifyDirection(),personName:document.getElementById("clarifyPerson")?.value.trim()||"",locationName:document.getElementById("clarifyLocation")?.value.trim()||"",date:document.getElementById("clarifyDate")?.value||"",time:document.getElementById("clarifyTime")?.value||"",plannedHours:document.getElementById("clarifyHours")?.disabled?"":(document.getElementById("clarifyHours")?.value||""),intent:(document.getElementById("clarifyIntent")?.value.trim()||clarifyType()).toUpperCase()};}
 async function saveClarify(d){const r=await submitMutationAndWait("clarify-inbox",d);if(r.status!=="clarified")throw new Error(r.error||r.message||"Clarification failed.");return r;}
 async function clarifyToTask(id){const d=collectClarify(id);try{await saveClarify(d);closeInboxClarifySheet();captureEntryMode="interpreted";interpretedCaptureDraft={sourceText:d.rawText,title:d.title,role:"",project:"",priority:"Medium",plannedHours:d.plannedHours,date:d.date,time:d.time,location:d.locationName,personName:d.personName,intent:d.intent,description:d.rawText,confidence:.99,parserVersion:"clarified-v1.8.1",sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid};render("capture",true);}catch(e){alert(e.message||e);}}
@@ -1531,7 +1730,7 @@ async function loadLiveCommitmentsData(force=false){
   if(!mobileBridge.endpoint)return false;if(liveCommitmentsLoading||(liveCommitmentsLoaded&&!force))return liveCommitmentsData;liveCommitmentsLoading=true;liveCommitmentsError=null;
   try{const p={action:'commitments'};if(mobileBridge.key)p.key=mobileBridge.key;const x=await jsonpRequest(mobileBridge.endpoint,p,12000,'Commitments data');if(!x||x.ok!==true)throw new Error(x?.error||'Could not load Commitments.');liveCommitmentsData=x.data||{summary:{open:0,waiting:0,closure:0,overdue:0},items:[]};liveCommitmentsLoaded=true;return liveCommitmentsData;}catch(err){liveCommitmentsError=err;throw err;}finally{liveCommitmentsLoading=false;}
 }
-function inboxRows(){const items=liveInboxData?.items||[];if(!items.length)return `<div class="empty-card"><strong>Inbox clear</strong></div>`;return items.map(x=>`<article class="inbox-row"><div class="inbox-topline"><span class="source">${escapeHtml(x.source||"CAPTURE")}</span><span class="commitment-pill">${escapeHtml(x.commitmentType||"DO")}</span></div><h3>${escapeHtml(x.title||x.rawText)}</h3><p>${escapeHtml(x.rawText||"")}</p><div class="meta">${escapeHtml([x.personName,x.locationName,x.date,x.time].filter(Boolean).join(" · "))}</div><div class="inbox-actions one-action"><button class="primary-btn compact inbox-clarify-btn" type="button" aria-label="Clarify ${escapeHtml(x.inboxId)}" data-inbox-clarify="${escapeHtml(x.inboxId)}"><span>Clarify</span></button></div></article>`).join("");}
+function inboxRows(){const items=liveInboxData?.items||[];if(!items.length)return `<div class="empty-card"><strong>Inbox clear</strong></div>`;return items.map(x=>`<article class="inbox-row"><div class="inbox-topline"><span class="source">${escapeHtml(x.source||"CAPTURE")}</span><span class="commitment-pill">${escapeHtml(x.commitmentType||"DO")}</span></div><h3>${escapeHtml(x.title||x.rawText)}</h3><p>${escapeHtml(x.rawText||"")}</p><div class="meta">${escapeHtml([x.personName,x.locationName,x.date,x.time].filter(Boolean).join(" · "))}</div><div class="inbox-actions one-action"><button class="primary-btn compact inbox-clarify-btn" type="button" aria-label="Review and classify ${escapeHtml(x.inboxId)}" data-inbox-clarify="${escapeHtml(x.inboxId)}"><span>Review &amp; classify</span></button></div></article>`).join("");}
 function commitmentRows(){const items=liveCommitmentsData?.items||[],filtered=activeCommitmentFilter==="ALL"?items:items.filter(x=>String(x.type||"DO").toUpperCase()===activeCommitmentFilter);if(!filtered.length)return `<div class="empty-card"><strong>No ${escapeHtml(activeCommitmentFilter==="ALL"?"open":activeCommitmentFilter)} commitments</strong></div>`;return filtered.map(x=>`<article class="commitment-card"><div class="state">${escapeHtml(x.type||"DO")}</div><h3>${escapeHtml(x.title||x.commitmentId)}</h3><p>${escapeHtml(x.direction?`Direction: ${x.direction}`:"")}</p></article>`).join("");}
 function home(){
   const [g,title,sub]=greeting();
@@ -1924,6 +2123,42 @@ document.addEventListener("click",e=>{
     return;
   }
 if(e.target.closest?.("[data-close-inbox-clarify]")){closeInboxClarifySheet();return;}const t=e.target.closest?.("[data-clarify-type]");if(t){document.querySelectorAll("[data-clarify-type]").forEach(x=>x.classList.toggle("selected",x===t));const rec=t.dataset.clarifyType==="WAIT"||t.dataset.clarifyType==="DELEGATE"?"OTHER":t.dataset.clarifyType==="MEET"?"SHARED":t.dataset.clarifyType==="DECIDE"?"ME":null;if(rec)document.querySelectorAll("[data-clarify-direction]").forEach(x=>x.classList.toggle("selected",x.dataset.clarifyDirection===rec));document.getElementById("clarifyIntent").value=t.dataset.clarifyType;updateClarifyRules();return;}const d=e.target.closest?.("[data-clarify-direction]");if(d){document.querySelectorAll("[data-clarify-direction]").forEach(x=>x.classList.toggle("selected",x===d));return;}const ct=e.target.closest?.("[data-clarify-task]");if(ct){clarifyToTask(ct.dataset.clarifyTask);return;}const cc=e.target.closest?.("[data-clarify-commitment]");if(cc){clarifyToCommitment(cc.dataset.clarifyCommitment);return;}const di=e.target.closest?.("[data-clarify-dismiss]");if(di){closeInboxClarifySheet();dismissInboxItem(di.dataset.clarifyDismiss);return;}});
+document.addEventListener("input",e=>{
+  if(
+    e.target?.id==="clarifyPerson" ||
+    e.target?.id==="clarifyDate" ||
+    e.target?.id==="clarifyTime" ||
+    e.target?.id==="clarifyLocation" ||
+    e.target?.id==="clarifyTitle"
+  ){
+    updateClarifySummary();
+  }
+});
+document.addEventListener("change",e=>{
+  if(
+    e.target?.id==="clarifyPerson" ||
+    e.target?.id==="clarifyDate" ||
+    e.target?.id==="clarifyTime"
+  ){
+    updateClarifySummary();
+  }
+});
+
+
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape" && document.getElementById("inboxClarifyBackdrop")){
+    e.preventDefault();
+    closeInboxClarifySheet();
+  }
+});
+
+document.addEventListener("click",e=>{
+  const backdrop=document.getElementById("inboxClarifyBackdrop");
+  if(backdrop && e.target===backdrop){
+    closeInboxClarifySheet();
+  }
+});
+
 function bindDynamic(){
   document.querySelectorAll("[data-route]").forEach(el=>{
     el.addEventListener("click",e=>{
