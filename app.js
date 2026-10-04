@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.7.5 - UNIFIED WRITE GATEWAY
+   Mobile Backend Integration v1.7.6 - SEMANTIC CAPTURE + UNIVERSAL IDENTITY
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -335,138 +335,275 @@ async function interpretCaptureText(){
 }
 
 
-function interpretCaptureLocally(sourceText){
-  const source=String(sourceText||"").trim();
-  if(!source) throw new Error("Enter something to interpret.");
 
-  const now=new Date();
-  const warnings=[];
-  const detected=[];
+function collapseRepeatedWords(value){
+  return String(value||"")
+    .replace(/\b([A-Za-z][A-Za-z'-]*)\s+\1\b/gi,"$1")
+    .replace(/\s+/g," ")
+    .trim();
+}
 
-  let dateObj=null;
-  let time="";
-  let plannedHours="";
-  let priority="Medium";
-  let role="";
-  let location="";
+function semanticDateIso(dateObj){
+  if(!dateObj) return "";
+  return `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,"0")}-${String(dateObj.getDate()).padStart(2,"0")}`;
+}
+
+function startOfWeekMonday(dateObj){
+  const d=new Date(dateObj.getFullYear(),dateObj.getMonth(),dateObj.getDate());
+  const day=d.getDay(); // Sun 0
+  const offset=day===0?-6:1-day;
+  d.setDate(d.getDate()+offset);
+  d.setHours(0,0,0,0);
+  return d;
+}
+
+function dateForWeekdayInWeek(baseMonday,weekdayIndex){
+  // weekdayIndex uses JS convention Sun=0; Monday-based offset:
+  const offset=weekdayIndex===0?6:weekdayIndex-1;
+  return new Date(
+    baseMonday.getFullYear(),
+    baseMonday.getMonth(),
+    baseMonday.getDate()+offset
+  );
+}
+
+function defaultDurationForIntent(intent){
+  switch(intent){
+    case "CALL": return .5;
+    case "MEET": return 1;
+    case "ATTEND": return 1;
+    case "REVIEW": return 1;
+    case "PREPARE": return 1;
+    case "SEND": return .25;
+    case "FOLLOW_UP": return .5;
+    default: return 1;
+  }
+}
+
+function detectSemanticIntent(source){
+  if(/\bfollow[\s-]?up\b/i.test(source)) return "FOLLOW_UP";
+  if(/\b(meet|meeting|see)\b/i.test(source)) return "MEET";
+  if(/\b(call|phone|ring)\b/i.test(source)) return "CALL";
+  if(/\b(review|check|assess)\b/i.test(source)) return "REVIEW";
+  if(/\b(prepare|draft|write|develop)\b/i.test(source)) return "PREPARE";
+  if(/\b(send|email|forward)\b/i.test(source)) return "SEND";
+  if(/\b(attend|visit|go to)\b/i.test(source)) return "ATTEND";
+  return "TASK";
+}
+
+function extractSemanticPerson(source,intent){
+  let m=null;
+
+  if(intent==="MEET"){
+    m=source.match(/\b(?:meet|see|meeting with)\s+(.+?)(?=\s+(?:at|in|via|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);
+  }else if(intent==="CALL"){
+    m=source.match(/\b(?:call|phone|ring)\s+(.+?)(?=\s+(?:at|in|via|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);
+  }else if(intent==="ATTEND"){
+    m=source.match(/\bvisit\s+(.+?)(?=\s+(?:at|in|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);
+  }
+
+  if(!m) return "";
+  return collapseRepeatedWords(
+    String(m[1]||"")
+      .replace(/^(with)\s+/i,"")
+      .trim()
+  );
+}
+
+function extractSemanticLocation(source){
+  // Explicit labels take precedence.
+  let m=source.match(/\b(?:location|venue)\s*[:\-]\s*(.+?)(?=\s+(?:next week|this week|next\s+(?:mon|tue|wed|thu|fri|sat|sun)|on\s+(?:mon|tue|wed|thu|fri|sat|sun)|today|tomorrow|at\s+\d|for\s+\d|for\s+(?:an?|one|half)\s+hour)\b|[,.;]|$)/i);
+  if(m) return collapseRepeatedWords(m[1]);
+
+  // Virtual venues.
+  m=source.match(/\bvia\s+(Zoom|Microsoft Teams|Teams|Google Meet|Meet)\b/i);
+  if(m) return collapseRepeatedWords(m[1]);
+
+  // Natural "at/in <venue>" but exclude temporal "at 9am".
+  m=source.match(/\b(?:at|in)\s+([A-Za-z][A-Za-z0-9&.'’()\/ -]{1,100}?)(?=\s+(?:next week|this week|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|today|tomorrow|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|for\s+\d|for\s+(?:an?|one|half)\s+hour)\b|[,.;]|$)/i);
+  if(m) return collapseRepeatedWords(m[1]);
+
+  return "";
+}
+
+function resolveSemanticDate(source,now,warnings,detected){
+  const weekdays=["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
+  const weekdayPattern="(sunday|monday|tuesday|wednesday|thursday|friday|saturday)";
 
   if(/\btoday\b/i.test(source)){
-    dateObj=new Date(now.getFullYear(),now.getMonth(),now.getDate());
     detected.push("today");
-  }else if(/\btomorrow\b/i.test(source)){
-    dateObj=new Date(now.getFullYear(),now.getMonth(),now.getDate()+1);
+    return new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  }
+
+  if(/\btomorrow\b/i.test(source)){
     detected.push("tomorrow");
-  }else{
-    const iso=source.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
-    if(iso){
-      const y=Number(iso[1]),m=Number(iso[2]),d=Number(iso[3]);
-      const candidate=new Date(y,m-1,d);
-      if(candidate.getFullYear()===y && candidate.getMonth()===m-1 && candidate.getDate()===d){
-        dateObj=candidate;
-        detected.push("explicit date");
-      }
-    }
+    return new Date(now.getFullYear(),now.getMonth(),now.getDate()+1);
+  }
 
-    if(!dateObj){
-      const slash=source.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](20\d{2}))?\b/);
-      if(slash){
-        const d=Number(slash[1]),m=Number(slash[2]);
-        const y=slash[3]?Number(slash[3]):now.getFullYear();
-        const candidate=new Date(y,m-1,d);
-        if(candidate.getFullYear()===y && candidate.getMonth()===m-1 && candidate.getDate()===d){
-          const todayStart=new Date(now.getFullYear(),now.getMonth(),now.getDate());
-          if(!slash[3] && candidate<todayStart) candidate.setFullYear(y+1);
-          dateObj=candidate;
-          detected.push("calendar date");
-        }
-      }
-    }
-
-    if(!dateObj){
-      const weekdays=["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
-      for(let i=0;i<weekdays.length;i++){
-        const re=new RegExp("\\b(?:next\\s+)?"+weekdays[i]+"\\b","i");
-        if(!re.test(source)) continue;
-        const current=now.getDay();
-        let delta=(i-current+7)%7;
-        if(delta===0) delta=7;
-        const nextRe=new RegExp("\\bnext\\s+"+weekdays[i]+"\\b","i");
-        if(nextRe.test(source) && delta<7) delta+=7;
-        dateObj=new Date(now.getFullYear(),now.getMonth(),now.getDate()+delta);
-        detected.push(weekdays[i]);
-        break;
-      }
+  let m=source.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+  if(m){
+    const y=Number(m[1]),mo=Number(m[2]),d=Number(m[3]);
+    const candidate=new Date(y,mo-1,d);
+    if(candidate.getFullYear()===y && candidate.getMonth()===mo-1 && candidate.getDate()===d){
+      detected.push("explicit date");
+      return candidate;
     }
   }
 
-  let tm=source.match(/\b(?:at|@)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
-  if(tm){
-    let hh=Number(tm[1]);
-    const mm=Number(tm[2]||0);
-    const ap=tm[3].toLowerCase();
+  m=source.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](20\d{2}))?\b/);
+  if(m){
+    const d=Number(m[1]),mo=Number(m[2]);
+    const y=m[3]?Number(m[3]):now.getFullYear();
+    const candidate=new Date(y,mo-1,d);
+    if(candidate.getFullYear()===y && candidate.getMonth()===mo-1 && candidate.getDate()===d){
+      const todayStart=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+      if(!m[3] && candidate<todayStart) candidate.setFullYear(y+1);
+      detected.push("calendar date");
+      return candidate;
+    }
+  }
+
+  // "next week on Tuesday", "Tuesday next week", "next week Tuesday"
+  const nextWeekRe1=new RegExp("\\bnext\\s+week(?:\\s+on)?\\s+"+weekdayPattern+"\\b","i");
+  const nextWeekRe2=new RegExp("\\b"+weekdayPattern+"\\s+next\\s+week\\b","i");
+  m=source.match(nextWeekRe1) || source.match(nextWeekRe2);
+  if(m){
+    const wd=weekdays.indexOf(String(m[1]||"").toLowerCase());
+    const monday=startOfWeekMonday(now);
+    const nextMonday=new Date(monday.getFullYear(),monday.getMonth(),monday.getDate()+7);
+    detected.push("next week "+weekdays[wd]);
+    return dateForWeekdayInWeek(nextMonday,wd);
+  }
+
+  // "this week on Tuesday"
+  const thisWeekRe=new RegExp("\\bthis\\s+week(?:\\s+on)?\\s+"+weekdayPattern+"\\b","i");
+  m=source.match(thisWeekRe);
+  if(m){
+    const wd=weekdays.indexOf(String(m[1]||"").toLowerCase());
+    const monday=startOfWeekMonday(now);
+    let candidate=dateForWeekdayInWeek(monday,wd);
+    const todayStart=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+    if(candidate<todayStart){
+      candidate=new Date(candidate.getFullYear(),candidate.getMonth(),candidate.getDate()+7);
+      warnings.push("The named day had already passed this week, so Op-Sym selected the next occurrence.");
+    }
+    detected.push("this week "+weekdays[wd]);
+    return candidate;
+  }
+
+  // "next Tuesday" means the next occurrence of Tuesday.
+  const nextDayRe=new RegExp("\\bnext\\s+"+weekdayPattern+"\\b","i");
+  m=source.match(nextDayRe);
+  if(m){
+    const wd=weekdays.indexOf(String(m[1]||"").toLowerCase());
+    let delta=(wd-now.getDay()+7)%7;
+    if(delta===0) delta=7;
+    detected.push("next "+weekdays[wd]);
+    return new Date(now.getFullYear(),now.getMonth(),now.getDate()+delta);
+  }
+
+  // "on Tuesday" / bare Tuesday -> next occurrence, today allowed only if still future.
+  const weekdayRe=new RegExp("\\b(?:on\\s+)?"+weekdayPattern+"\\b","i");
+  m=source.match(weekdayRe);
+  if(m){
+    const wd=weekdays.indexOf(String(m[1]||"").toLowerCase());
+    let delta=(wd-now.getDay()+7)%7;
+    if(delta===0) delta=0;
+    detected.push(weekdays[wd]);
+    return new Date(now.getFullYear(),now.getMonth(),now.getDate()+delta);
+  }
+
+  // "in 3 days/weeks"
+  m=source.match(/\bin\s+(\d+)\s+(day|days|week|weeks)\b/i);
+  if(m){
+    const n=Number(m[1]);
+    const multiplier=/week/i.test(m[2])?7:1;
+    detected.push("relative interval");
+    return new Date(now.getFullYear(),now.getMonth(),now.getDate()+n*multiplier);
+  }
+
+  return null;
+}
+
+function resolveSemanticTime(source,warnings,detected){
+  let m=source.match(/\b(?:at|@)?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+  if(m){
+    let hh=Number(m[1]);
+    const mm=Number(m[2]||0);
+    const ap=m[3].toLowerCase();
     if(hh>=1 && hh<=12 && mm<=59){
       if(ap==="pm" && hh!==12) hh+=12;
       if(ap==="am" && hh===12) hh=0;
-      time=String(hh).padStart(2,"0")+":"+String(mm).padStart(2,"0");
       detected.push("time");
+      return String(hh).padStart(2,"0")+":"+String(mm).padStart(2,"0");
     }
   }
 
-  if(!time){
-    tm=source.match(/\b(?:at|@)\s*([01]?\d|2[0-3]):([0-5]\d)\b/i);
-    if(tm){
-      time=String(Number(tm[1])).padStart(2,"0")+":"+tm[2];
+  m=source.match(/\b(?:at|@)\s*([01]?\d|2[0-3]):([0-5]\d)\b/i);
+  if(m){
+    detected.push("time");
+    return String(Number(m[1])).padStart(2,"0")+":"+m[2];
+  }
+
+  m=source.match(/\b(?:at|@)\s*(\d{1,2})(?![:\d])\b/i);
+  if(m){
+    const hh=Number(m[1]);
+    if(hh>=0 && hh<=23){
+      warnings.push("Time was interpreted in 24-hour format because AM/PM was not stated.");
       detected.push("time");
+      return String(hh).padStart(2,"0")+":00";
     }
   }
 
-  if(!time){
-    tm=source.match(/\b(?:at|@)\s*(\d{1,2})(?![:\d])\b/i);
-    if(tm){
-      const hh=Number(tm[1]);
-      if(hh>=0 && hh<=23){
-        time=String(hh).padStart(2,"0")+":00";
-        warnings.push("Time was interpreted in 24-hour format because AM/PM was not stated.");
-        detected.push("time");
-      }
-    }
-  }
+  return "";
+}
 
-  let dur=source.match(/\bfor\s+(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr)\b/i);
-  if(dur){
-    plannedHours=Number(dur[1]);
+function resolveSemanticDuration(source,intent,inferences,detected){
+  let m=source.match(/\bfor\s+(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr)\b/i);
+  if(m){
     detected.push("duration");
-  }else{
-    dur=source.match(/\bfor\s+(\d+)\s*(?:minutes?|mins?|min)\b/i);
-    if(dur){
-      plannedHours=Math.round((Number(dur[1])/60)*100)/100;
-      detected.push("duration");
-    }else if(/\bfor\s+(?:an?|one)\s+hour\b/i.test(source)){
-      plannedHours=1;
-      detected.push("duration");
-    }else if(/\bfor\s+half\s+(?:an?\s+)?hour\b/i.test(source)){
-      plannedHours=.5;
-      detected.push("duration");
-    }
+    return Number(m[1]);
   }
 
-  if(/\b(urgent|asap|immediately)\b/i.test(source)) priority="Urgent";
-  else if(/\bhigh priority\b/i.test(source)) priority="High";
-  else if(/\blow priority\b/i.test(source)) priority="Low";
+  m=source.match(/\bfor\s+(\d+)\s*(?:minutes?|mins?|min)\b/i);
+  if(m){
+    detected.push("duration");
+    return Math.round((Number(m[1])/60)*100)/100;
+  }
 
-  const roleMatch=source.match(/\brole\s*[:\-]\s*([a-z][a-z \-&]{2,40})/i);
-  if(roleMatch) role=roleMatch[1].trim();
+  if(/\bfor\s+(?:an?|one)\s+hour\b/i.test(source)){
+    detected.push("duration");
+    return 1;
+  }
 
-  const locMatch=source.match(/\b(?:location|venue)\s*[:\-]\s*([^,.;]{2,80})/i);
-  if(locMatch) location=locMatch[1].trim();
+  if(/\bfor\s+half\s+(?:an?\s+)?hour\b/i.test(source)){
+    detected.push("duration");
+    return .5;
+  }
+
+  const inferred=defaultDurationForIntent(intent);
+  inferences.push(`Duration was not stated; Op-Sym proposed ${inferred} hour${inferred===1?"":"s"} based on the ${intent} intent.`);
+  return inferred;
+}
+
+function buildSemanticTitle(source,intent,personName,location){
+  if(personName){
+    if(intent==="MEET") return `Meet ${personName}`;
+    if(intent==="CALL") return `Call ${personName}`;
+    if(intent==="ATTEND") return `Visit ${personName}`;
+  }
 
   let title=source
     .replace(/\b(today|tomorrow)\b/ig," ")
+    .replace(/\bnext\s+week(?:\s+on)?\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig," ")
+    .replace(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+next\s+week\b/ig," ")
+    .replace(/\bthis\s+week(?:\s+on)?\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig," ")
     .replace(/\bnext\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig," ")
-    .replace(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig," ")
+    .replace(/\b(?:on\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig," ")
     .replace(/\b20\d{2}-\d{2}-\d{2}\b/g," ")
     .replace(/\b\d{1,2}[\/\-]\d{1,2}(?:[\/\-]20\d{2})?\b/g," ")
     .replace(/\b(?:at|@)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b/ig," ")
+    .replace(/\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/ig," ")
     .replace(/\bfor\s+(?:\d+(?:\.\d+)?|an?|one|half)\s*(?:hours?|hrs?|hr|minutes?|mins?|min|(?:an?\s+)?hour)\b/ig," ")
     .replace(/\b(?:urgent|asap|immediately|high priority|low priority)\b/ig," ")
     .replace(/\brole\s*[:\-]\s*[a-z][a-z \-&]{2,40}/ig," ")
@@ -475,46 +612,93 @@ function interpretCaptureLocally(sourceText){
     .replace(/^[,.;:\-\s]+|[,.;:\-\s]+$/g,"")
     .trim();
 
-  if(!title) title=source;
+  if(location){
+    const escaped=location.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+    title=title.replace(new RegExp("\\b(?:at|in)\\s+"+escaped+"\\b","i"),"").replace(/\s+/g," ").trim();
+  }
+
+  return collapseRepeatedWords(title || source);
+}
+
+function interpretCaptureLocally(sourceText){
+  const source=collapseRepeatedWords(String(sourceText||"").trim());
+  if(!source) throw new Error("Enter something to interpret.");
+
+  const now=new Date();
+  const warnings=[];
+  const inferences=[];
+  const detected=[];
+
+  const intent=detectSemanticIntent(source);
+  const personName=extractSemanticPerson(source,intent);
+  const location=extractSemanticLocation(source);
+  const dateObj=resolveSemanticDate(source,now,warnings,detected);
+  const time=resolveSemanticTime(source,warnings,detected);
+  const plannedHours=resolveSemanticDuration(source,intent,inferences,detected);
+
+  let priority="Medium";
+  if(/\b(urgent|asap|immediately)\b/i.test(source)) priority="Urgent";
+  else if(/\bhigh priority\b/i.test(source)) priority="High";
+  else if(/\blow priority\b/i.test(source)) priority="Low";
+
+  const roleMatch=source.match(/\brole\s*[:\-]\s*([a-z][a-z \-&]{2,40})/i);
+  const role=roleMatch?collapseRepeatedWords(roleMatch[1]):"";
 
   if(time && !dateObj){
-    warnings.push("A time was found but no date was found. Choose a date before creating the task.");
+    warnings.push("A time was found but no date was resolved.");
   }
   if(dateObj && !time){
-    warnings.push("A date was found but no start time was found. The task can be created as an ANY-time item.");
+    inferences.push("No start time was stated; the item can remain an ANY-time task.");
   }
-  if(!plannedHours && time){
-    warnings.push("No duration was found. Add Planned hours if you want conflict checking.");
-  }
+
+  const title=buildSemanticTitle(source,intent,personName,location);
 
   let confidence=.55;
-  if(title) confidence+=.15;
-  if(dateObj) confidence+=.10;
-  if(time) confidence+=.10;
-  if(plannedHours) confidence+=.05;
-  if(warnings.length===0) confidence+=.05;
-  confidence=Math.min(.95,Math.round(confidence*100)/100);
-
-  const date=dateObj
-    ? `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,"0")}-${String(dateObj.getDate()).padStart(2,"0")}`
-    : "";
+  if(title) confidence+=.08;
+  if(intent!=="TASK") confidence+=.07;
+  if(personName) confidence+=.05;
+  if(location) confidence+=.05;
+  if(dateObj) confidence+=.08;
+  if(time) confidence+=.07;
+  if(plannedHours) confidence+=.03;
+  if(warnings.length===0) confidence+=.02;
+  confidence=Math.min(.98,Math.round(confidence*100)/100);
 
   return {
     sourceText:source,
-    title, role, project:"", priority, plannedHours, date, time, location,
+    title,
+    role,
+    project:"",
+    priority,
+    plannedHours,
+    date:semanticDateIso(dateObj),
+    time,
+    location,
+    personName,
+    intent,
     description:source,
     confidence,
-    confidenceLabel:confidence>=.85?"High":(confidence>=.70?"Medium":"Needs review"),
-    warnings, detected, requiresReview:true, interpreter:"local-v1.7.2"
+    confidenceLabel:confidence>=.88?"High":(confidence>=.72?"Medium":"Needs review"),
+    warnings,
+    inferences,
+    detected,
+    requiresReview:true,
+    parserVersion:"semantic-local-v2.0"
   };
 }
 
 function runLocalInterpreterSelfTest(){
-  const sample=interpretCaptureLocally("Meet Gilbert tomorrow at 10 am for one hour");
+  const sample=interpretCaptureLocally(
+    "Meet Prof Parker at Aster Hospital Hospital next week on Tuesday at 9am"
+  );
+
   return !!sample &&
-    sample.title==="Meet Gilbert" &&
+    sample.title==="Meet Prof Parker" &&
+    sample.personName==="Prof Parker" &&
+    sample.location==="Aster Hospital" &&
     !!sample.date &&
-    sample.time==="10:00" &&
+    sample.time==="09:00" &&
+    sample.intent==="MEET" &&
     Number(sample.plannedHours)===1;
 }
 
@@ -552,14 +736,20 @@ function showCaptureReviewSheet(draft){
         ${warnings.map(w=>`<div>• ${escapeHtml(w)}</div>`).join("")}
       </div>` : ""}
 
+      ${(draft.inferences||[]).length ? `<div class="capture-inferences">
+        ${(draft.inferences||[]).map(w=>`<div>• ${escapeHtml(w)}</div>`).join("")}
+      </div>` : ""}
+
       <div class="capture-review-list">
         ${captureReviewRow("Task",draft.title)}
+        ${captureReviewRow("Intent",draft.intent)}
+        ${captureReviewRow("Person",draft.personName)}
+        ${captureReviewRow("Location",draft.location)}
         ${captureReviewRow("Date",draft.date)}
         ${captureReviewRow("Start time",draft.time)}
         ${captureReviewRow("Planned hours",draft.plannedHours)}
         ${captureReviewRow("Priority",draft.priority)}
         ${captureReviewRow("Role",draft.role)}
-        ${captureReviewRow("Location",draft.location)}
       </div>
 
       <div class="capture-review-actions">
@@ -853,11 +1043,21 @@ async function createTaskFromForm(){
   createTaskInFlight=true;
 
   try{
+    const semanticDraft=(captureEntryMode==="interpreted" && interpretedCaptureDraft)
+      ? interpretedCaptureDraft
+      : null;
+
     const params={
       action:"create-task",
       requestId,
       title,role,project,priority,
-      plannedHours,date,time,location,description
+      plannedHours,date,time,location,description,
+      captureSource: semanticDraft ? "natural_language" : (captureEntryMode==="today" ? "add_to_today" : "manual"),
+      rawCaptureText: semanticDraft?.sourceText || "",
+      parserVersion: semanticDraft?.parserVersion || "",
+      parsedIntent: semanticDraft?.intent || "",
+      captureConfidence: semanticDraft ? String(semanticDraft.confidence ?? "") : "",
+      personName: semanticDraft?.personName || ""
     };
     if(mobileBridge.key) params.key=mobileBridge.key;
 

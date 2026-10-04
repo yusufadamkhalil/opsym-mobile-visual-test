@@ -982,3 +982,16 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
 /* v1.7.4 dedicated POST write gateway - no visual redesign. */
 
 /* v1.7.5 unified POST write gateway for Create, Complete and Reschedule. */
+
+
+/* v1.7.6 semantic capture inference notes */
+.capture-inferences{
+  margin:0 0 12px;
+  padding:12px 14px;
+  border:1px solid #D8E7FF;
+  border-radius:15px;
+  background:#F7FAFF;
+  color:#334155;
+  font-size:13px;
+  line-height:1.45;
+}
