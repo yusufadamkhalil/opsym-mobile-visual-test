@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.7.4 - RELIABLE WRITE GATEWAY
+   Mobile Backend Integration v1.7.5 - UNIFIED WRITE GATEWAY
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -261,18 +261,14 @@ async function completeTaskById(taskId,title=""){
 
   completeActionInFlight=true;
   try{
-    const params={action:"complete-task",taskId:id};
-    if(mobileBridge.key) params.key=mobileBridge.key;
+    const result=await submitMutationAndWait("complete-task",{taskId:id});
 
-    const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
-    if(!payload || payload.ok!==true){
-      throw new Error(payload?.error || "The task could not be completed.");
+    if(result.status==="error"){
+      throw new Error(result.error || result.message || "The task could not be completed.");
     }
 
-    const result=payload.data || {};
     toast(result.changed===false ? "Task was already closed" : "Task completed");
 
-    // Refresh every live surface that can be affected by completion.
     liveHomeLoaded=false;
     liveTodayLoaded=false;
     liveTasksLoaded=false;
@@ -286,8 +282,6 @@ async function completeTaskById(taskId,title=""){
       loadLiveTasksData(false)
     ]);
 
-    // A completed task disappears from open Tasks/Today, so return there
-    // rather than leaving a stale detail page onscreen.
     if(currentRoute()==="task-detail"){
       selectedTaskId="";
       activeTaskDetailTab="details";
@@ -298,14 +292,16 @@ async function completeTaskById(taskId,title=""){
 
     return true;
   }catch(err){
-    alert("Could not complete task:\n"+(err?.message || err));
+    alert(
+      "Could not complete task:\n"+
+      (err?.message || err)+
+      "\n\nDo not repeat the action until you have checked the task status if an acknowledgement timeout occurred."
+    );
     return false;
   }finally{
     completeActionInFlight=false;
   }
 }
-
-
 
 
 async function interpretCaptureText(){
@@ -681,6 +677,73 @@ async function waitForCreateRequestStatus(requestId,{
   throw new Error(`Task creation acknowledgement timed out after ${Math.round(timeoutMs/1000)} seconds.${suffix}`);
 }
 
+
+async function checkMutationStatus(requestId,timeoutMs=8000){
+  const params={action:"mutation-status",requestId};
+  if(mobileBridge.key) params.key=mobileBridge.key;
+
+  const payload=await jsonpRequest(
+    mobileBridge.endpoint,
+    params,
+    timeoutMs,
+    "Mutation status"
+  );
+
+  if(!payload || payload.ok!==true){
+    throw new Error(payload?.error || "Could not confirm write status.");
+  }
+
+  return payload.data || {};
+}
+
+async function waitForMutationStatus(requestId,{
+  timeoutMs=45000,
+  pollMs=1500
+}={}){
+  const deadline=Date.now()+timeoutMs;
+  let lastError=null;
+
+  while(Date.now()<deadline){
+    await new Promise(resolve=>setTimeout(resolve,pollMs));
+
+    try{
+      const status=await checkMutationStatus(requestId,8000);
+      if(
+        status.status==="completed" ||
+        status.status==="rescheduled" ||
+        status.status==="blocked" ||
+        status.status==="error"
+      ){
+        return status;
+      }
+    }catch(err){
+      lastError=err;
+    }
+  }
+
+  const suffix=lastError ? ` Last status error: ${lastError.message||lastError}` : "";
+  throw new Error(`Write acknowledgement timed out after ${Math.round(timeoutMs/1000)} seconds.${suffix}`);
+}
+
+async function submitMutationAndWait(action,fields){
+  if(!mobileBridge.endpoint){
+    throw new Error("Mobile Bridge is not configured.");
+  }
+
+  const requestId=createClientRequestId().replace(/^create-/,"mutation-");
+  const params={action,requestId,...fields};
+  if(mobileBridge.key) params.key=mobileBridge.key;
+
+  submitBridgePost(params);
+
+  const result=await waitForMutationStatus(requestId,{
+    timeoutMs:45000,
+    pollMs:1500
+  });
+
+  return {...result,requestId};
+}
+
 async function testWriteGateway(){
   const requestId="writeping-"+createClientRequestId().replace(/^create-/,"");
 
@@ -942,21 +1005,17 @@ async function confirmAndWriteReschedule(taskId,title,preview){
   );
   if(!confirmed) return false;
 
-  const params={
-    action:"reschedule-task",
+  const result=await submitMutationAndWait("reschedule-task",{
     taskId,
     date:preview.date,
     time:preview.time
-  };
-  if(mobileBridge.key) params.key=mobileBridge.key;
+  });
 
-  const payload=await jsonpRequest(mobileBridge.endpoint,params,12000);
-  if(!payload || payload.ok!==true){
-    throw new Error(payload?.error || "The task could not be rescheduled.");
+  if(result.status==="error"){
+    throw new Error(result.error || result.message || "The task could not be rescheduled.");
   }
 
-  const result=payload.data || {};
-  if(result.blocked){
+  if(result.blocked || result.status==="blocked"){
     const suggestions=await fetchSmartRescheduleSuggestions(taskId,preview.date);
     showSmartRescheduleSheet({
       taskId,
@@ -968,7 +1027,7 @@ async function confirmAndWriteReschedule(taskId,title,preview){
   }
 
   closeSmartRescheduleSheet();
-  toast("Task rescheduled");
+  toast(result.recovered ? "Task reschedule confirmed" : "Task rescheduled");
 
   liveHomeLoaded=false;
   liveTodayLoaded=false;
@@ -991,7 +1050,6 @@ async function confirmAndWriteReschedule(taskId,title,preview){
 
   return true;
 }
-
 function smartRescheduleSlotMarkup(slot){
   return `<button class="smart-slot"
     data-smart-slot-date="${escapeHtml(slot.date||"")}"
