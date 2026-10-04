@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.8.0 - INBOX + COMMITMENTS
+   Mobile Backend Integration v1.8.1 - CLARIFICATION + DUPLICATE INTELLIGENCE
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -78,6 +78,7 @@ let interpretedCaptureDraft = null;
 let liveInboxLoaded=false, liveInboxLoading=false, liveInboxData=null, liveInboxError=null;
 let liveCommitmentsLoaded=false, liveCommitmentsLoading=false, liveCommitmentsData=null, liveCommitmentsError=null;
 let inboxCaptureInFlight=false, commitmentActionInFlight=false;
+let activeCommitmentFilter="ALL";
 let localInterpreterReady = true;
 
 const mobileBridge = {
@@ -394,24 +395,7 @@ function detectSemanticIntent(source){
   return "TASK";
 }
 
-function extractSemanticPerson(source,intent){
-  let m=null;
-
-  if(intent==="MEET"){
-    m=source.match(/\b(?:meet|see|meeting with)\s+(.+?)(?=\s+(?:at|in|via|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);
-  }else if(intent==="CALL"){
-    m=source.match(/\b(?:call|phone|ring)\s+(.+?)(?=\s+(?:at|in|via|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);
-  }else if(intent==="ATTEND"){
-    m=source.match(/\bvisit\s+(.+?)(?=\s+(?:at|in|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);
-  }
-
-  if(!m) return "";
-  return collapseRepeatedWords(
-    String(m[1]||"")
-      .replace(/^(with)\s+/i,"")
-      .trim()
-  );
-}
+function extractSemanticPerson(source,intent){let m=null;if(intent==="MEET")m=source.match(/\b(?:meet|see|meeting with)\s+(.+?)(?=\s+(?:at|in|via|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);else if(intent==="CALL")m=source.match(/\b(?:call|phone|ring)\s+(.+?)(?=\s+(?:at|in|via|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);if(!m)m=source.match(/\b(?:waiting for|awaiting|pending from)\s+(.+?)(?=\s+(?:to|until|on|next|this|today|tomorrow)\b|[,.;]|$)/i);if(!m)m=source.match(/\b(?:ask|tell)\s+(.+?)\s+to\b/i);return m?collapseRepeatedWords(String(m[1]||"").trim()):"";}
 
 function extractSemanticLocation(source){
   // Explicit labels take precedence.
@@ -623,15 +607,7 @@ function buildSemanticTitle(source,intent,personName,location){
   return collapseRepeatedWords(title || source);
 }
 
-function classifyCommitmentLocally(sourceText,semanticDraft=null){
-  const source=String(sourceText||'').trim(); let type='DO',direction='ME',rationale='A concrete action appears to be required.';
-  if(/\b(waiting for|awaiting|pending from|once .+ replies?|after .+ responds?)\b/i.test(source)){type='WAIT';direction='OTHER';rationale='The next move depends on another person or external response.';}
-  else if(/\b(delegate|assign|ask\s+.+?\s+to|tell\s+.+?\s+to)\b/i.test(source)){type='DELEGATE';direction='OTHER';rationale='The next move has been assigned to another person.';}
-  else if(/\b(decide|choose|select|approve|determine|consider whether)\b/i.test(source)){type='DECIDE';direction='ME';rationale='The open loop requires a decision.';}
-  else if(/\b(meet|meeting|appointment|attend|visit)\b/i.test(source)||semanticDraft?.intent==='MEET'){type='MEET';direction='SHARED';rationale='The commitment is a shared interaction.';}
-  let confidence=type==='WAIT'||type==='MEET'?0.94:type==='DELEGATE'?0.92:type==='DECIDE'?0.90:0.84;
-  return {commitmentType:type,direction,commitmentConfidence:confidence,commitmentRationale:rationale,commitmentParserVersion:'commitment-local-v1.0'};
-}
+function classifyCommitmentLocally(sourceText,semanticDraft=null){const source=String(sourceText||"").trim();let type="DO",direction="ME",counterparty=semanticDraft?.personName||"";if(/\b(waiting for|awaiting|pending from|expecting .* from|when .* replies?|once .* sends?|after .* responds?)\b/i.test(source)){type="WAIT";direction="OTHER";const m=source.match(/\b(?:waiting for|awaiting|pending from)\s+(.+?)(?=\s+(?:to|until|on|next|this|today|tomorrow)\b|[,.;]|$)/i);if(m)counterparty=collapseRepeatedWords(m[1]);}else if(/\b(delegate|assign|ask\s+.+?\s+to|tell\s+.+?\s+to)\b/i.test(source)){type="DELEGATE";direction="OTHER";const m=source.match(/\b(?:ask|tell)\s+(.+?)\s+to\b/i);if(m)counterparty=collapseRepeatedWords(m[1]);}else if(/\b(decide|choose|select|approve|determine|consider whether)\b/i.test(source)){type="DECIDE";direction="ME";}else if(/\b(meet|meeting|appointment|attend|visit)\b/i.test(source)||semanticDraft?.intent==="MEET"){type="MEET";direction="SHARED";}const confidence=type==="WAIT"||type==="MEET"?.94:type==="DELEGATE"?.92:type==="DECIDE"?.90:.84;return{commitmentType:type,direction,counterparty,commitmentConfidence:confidence,commitmentParserVersion:"commitment-local-v1.1"};}
 
 function interpretCaptureLocally(sourceText){
   const source=collapseRepeatedWords(String(sourceText||"").trim());
@@ -915,6 +891,11 @@ async function waitForMutationStatus(requestId,{
         status.status==="completed" ||
         status.status==="rescheduled" ||
         status.status==="blocked" ||
+        status.status==="captured" ||
+        status.status==="duplicate" ||
+        status.status==="commitment_created" ||
+        status.status==="resolved" ||
+        status.status==="clarified" ||
         status.status==="error"
       ){
         return status;
@@ -1018,12 +999,17 @@ async function finishSuccessfulTaskCreation(result){
 }
 
 function getInboxItem(id){return (liveInboxData?.items||[]).find(x=>x.inboxId===id)||null;}
-function buildInboxDraft(text){const s=interpretCaptureLocally(text),c=classifyCommitmentLocally(text,s);return {...s,...c,combinedConfidence:Math.round(((Number(s.confidence||0)+Number(c.commitmentConfidence||0))/2)*100)/100};}
-async function captureToInbox(text){if(inboxCaptureInFlight)return false;text=String(text||'').trim();if(!text){alert('Enter something to capture.');return false;}const d=buildInboxDraft(text);if(!confirm(`Capture this to Inbox?\n\n${d.title}\n\nType: ${d.commitmentType}\nDirection: ${d.direction}\nDate: ${d.date||'Not resolved'}\nTime: ${d.time||'Not resolved'}\nLocation: ${d.location||'Not stated'}`))return false;inboxCaptureInFlight=true;try{const r=await submitMutationAndWait('capture-inbox',{rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,confidence:String(d.combinedConfidence),personName:d.personName||'',locationName:d.location||'',date:d.date||'',time:d.time||'',plannedHours:d.plannedHours||'',parserVersion:'semantic-local-v2.0+commitment-local-v1.0',source:captureEntryMode==='commitment'?'mobile_commitment_capture':'mobile_inbox_capture'});if(r.status==='error')throw new Error(r.error||r.message||'Inbox capture failed.');liveInboxLoaded=false;await loadLiveInboxData(false);toast(`Captured ${r.inboxId||'to Inbox'}`);captureEntryMode='general';render('inbox',true);return true;}catch(err){alert('Could not capture to Inbox:\n'+(err?.message||err));return false;}finally{inboxCaptureInFlight=false;}}
-function promoteInboxToTask(id){const x=getInboxItem(id);if(!x)return;captureEntryMode='interpreted';interpretedCaptureDraft={sourceText:x.rawText||'',title:x.title||x.rawText||'',role:'',project:'',priority:'Medium',plannedHours:x.plannedHours||1,date:x.date||'',time:x.time||'',location:x.locationName||'',personName:x.personName||'',intent:x.intent||'TASK',description:x.rawText||'',confidence:Number(x.confidence||.8),confidenceLabel:'Review',warnings:[],inferences:[],detected:[],requiresReview:true,parserVersion:x.parserVersion||'inbox-promotion-v1.0',sourceInboxId:x.inboxId,sourceInboxUuid:x.objectUuid};render('capture',true);}
-async function promoteInboxToCommitment(id){if(commitmentActionInFlight)return false;const x=getInboxItem(id);if(!x)return false;if(!confirm(`Create this commitment?\n\n${x.title||x.rawText}\n\nType: ${x.commitmentType||'DO'}\nDirection: ${x.direction||'ME'}`))return false;commitmentActionInFlight=true;try{const r=await submitMutationAndWait('create-commitment',{title:x.title||x.rawText,commitmentType:x.commitmentType||'DO',direction:x.direction||'ME',personName:x.personName||'',dueDate:x.date||'',sourceInboxId:x.inboxId,sourceInboxUuid:x.objectUuid||'',rawText:x.rawText||'',confidence:x.confidence||'',parserVersion:x.parserVersion||'commitment-local-v1.0'});if(r.status==='error')throw new Error(r.error||r.message||'Commitment creation failed.');liveInboxLoaded=false;liveCommitmentsLoaded=false;await Promise.all([loadLiveInboxData(false),loadLiveCommitmentsData(false)]);toast(`Created ${r.commitmentId||'commitment'}`);render('commitments',true);return true;}catch(err){alert('Could not create commitment:\n'+(err?.message||err));return false;}finally{commitmentActionInFlight=false;}}
-async function dismissInboxItem(id){const x=getInboxItem(id);if(!x||!confirm(`Dismiss this Inbox item?\n\n${x.title||x.rawText}`))return false;try{const r=await submitMutationAndWait('resolve-inbox',{inboxId:id,status:'Dismissed'});if(r.status==='error')throw new Error(r.error||r.message);liveInboxLoaded=false;await loadLiveInboxData(false);render('inbox',true);return true;}catch(err){alert('Could not dismiss Inbox item:\n'+(err?.message||err));return false;}}
-
+function buildInboxDraft(text){const s=interpretCaptureLocally(text),c=classifyCommitmentLocally(text,s),personName=c.counterparty||s.personName||"",intent=["WAIT","DELEGATE","DECIDE"].includes(c.commitmentType)?c.commitmentType:(c.commitmentType==="MEET"?"MEET":s.intent);let plannedHours=s.plannedHours;if(c.commitmentType==="WAIT"||c.commitmentType==="DELEGATE")plannedHours="";return{...s,...c,personName,intent,plannedHours,combinedConfidence:Math.round(((Number(s.confidence||0)+Number(c.commitmentConfidence||0))/2)*100)/100};}
+async function captureToInbox(text){if(inboxCaptureInFlight)return false;text=String(text||"").trim();if(!text){alert("Enter something to capture.");return false;}const d=buildInboxDraft(text);try{await loadLiveInboxData(true);}catch(_){}const norm=v=>String(v||"").toLowerCase().replace(/[^\p{L}\p{N}]+/gu," ").replace(/\s+/g," ").trim(),sim=(x,y)=>{const A=new Set(norm(x).split(" ").filter(Boolean)),B=new Set(norm(y).split(" ").filter(Boolean));if(!A.size||!B.size)return 0;let n=0;A.forEach(t=>{if(B.has(t))n++;});return n/new Set([...A,...B]).size;};let dup=null,score=0;for(const x of(liveInboxData?.items||[])){const q=sim(text,x.rawText||"");if(q>score){score=q;dup=x;}}if(score>=.72&&!confirm(`This looks ${norm(dup.rawText)===norm(text)?"the same as":"very similar to"} ${dup.inboxId}.\n\nPress OK only if this is intentionally a separate occurrence.`)){render("inbox",true);return false;}if(!confirm(`Capture this to Inbox?\n\n${d.title}\n\nType: ${d.commitmentType}\nDirection: ${d.direction}\nPerson: ${d.personName||"Not resolved"}\nDate: ${d.date||"Not resolved"}\nTime: ${d.time||"Not resolved"}`))return false;inboxCaptureInFlight=true;try{let r=await submitMutationAndWait("capture-inbox",{rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",parserVersion:"semantic-local-v2.0+commitment-local-v1.1",forceDuplicate:String(score>=.72),source:"mobile_inbox_capture"});if(r.status==="duplicate"){if(!confirm(`A matching open Inbox item already exists: ${r.existing?.inboxId||"existing item"}.\n\nPress OK to capture another separate copy.`)){liveInboxLoaded=false;await loadLiveInboxData(false);render("inbox",true);return false;}r=await submitMutationAndWait("capture-inbox",{rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",forceDuplicate:"true",source:"mobile_inbox_capture"});}if(r.status!=="captured")throw new Error(r.error||r.message||"Inbox capture was not confirmed.");liveInboxLoaded=false;await loadLiveInboxData(false);render("inbox",true);return true;}catch(err){alert("Could not capture to Inbox:\n"+(err?.message||err));return false;}finally{inboxCaptureInFlight=false;}}
+function openInboxClarifySheet(id){const x=getInboxItem(id);if(!x)return;const el=document.createElement("div");el.className="smart-sheet-backdrop";el.id="inboxClarifyBackdrop";el.innerHTML=`<section class="smart-sheet"><div class="smart-sheet-head"><div><span class="eyebrow">CLARIFY · ${escapeHtml(id)}</span><h2>Confirm what this means.</h2></div><button class="icon-btn" data-close-inbox-clarify>×</button></div><div class="inbox-raw-box">${escapeHtml(x.rawText||"")}</div><label class="form-field full"><span>Title</span><input id="clarifyTitle" value="${escapeHtml(x.title||x.rawText||"")}"></label><div class="clarify-group"><span class="clarify-label">Commitment classification</span><div class="choice-strip five">${["DO","MEET","WAIT","DELEGATE","DECIDE"].map(c=>`<button type="button" class="choice-chip ${c===String(x.commitmentType||"DO").toUpperCase()?"selected":""}" data-clarify-type="${c}">${c}</button>`).join("")}</div></div><div class="clarify-group"><span class="clarify-label">Who owns the next move?</span><div class="choice-strip">${["ME","OTHER","SHARED"].map(c=>`<button type="button" class="choice-chip ${c===String(x.direction||"ME").toUpperCase()?"selected":""}" data-clarify-direction="${c}">${c}</button>`).join("")}</div></div><div class="form-grid"><label class="form-field"><span>Person</span><input id="clarifyPerson" value="${escapeHtml(x.personName||"")}"></label><label class="form-field"><span>Location</span><input id="clarifyLocation" value="${escapeHtml(x.locationName||"")}"></label><label class="form-field"><span>Date</span><input id="clarifyDate" type="date" value="${escapeHtml(x.date||"")}"></label><label class="form-field"><span>Time</span><input id="clarifyTime" type="time" value="${escapeHtml(x.time||"")}"></label><label class="form-field"><span>Planned hours</span><input id="clarifyHours" type="number" step=".25" value="${escapeHtml(x.plannedHours||"")}"></label><label class="form-field"><span>Intent</span><input id="clarifyIntent" value="${escapeHtml(x.intent||x.commitmentType||"TASK")}"></label></div><p id="clarifyOwnershipHelp" class="clarify-help"></p><div class="smart-sheet-actions"><button class="ghost-btn" data-clarify-task="${id}">Create Task</button><button class="primary-btn" data-clarify-commitment="${id}">Create Commitment</button></div><button class="text-btn" data-clarify-dismiss="${id}">Dismiss</button></section>`;document.body.appendChild(el);updateClarifyRules();}
+function closeInboxClarifySheet(){document.getElementById("inboxClarifyBackdrop")?.remove();}
+function clarifyType(){return document.querySelector("[data-clarify-type].selected")?.dataset.clarifyType||"DO";}
+function clarifyDirection(){return document.querySelector("[data-clarify-direction].selected")?.dataset.clarifyDirection||"ME";}
+function updateClarifyRules(){const t=clarifyType(),h=document.getElementById("clarifyHours"),p=document.getElementById("clarifyOwnershipHelp");if(!h||!p)return;if(t==="WAIT"||t==="DELEGATE"){h.value="";h.disabled=true;p.textContent=t+" means the next move belongs to another person; your duration is not applicable.";}else{h.disabled=false;p.textContent="Correct any proposed value before creating the final object.";}}
+function collectClarify(id){const x=getInboxItem(id);return{inboxId:id,inboxUuid:x.objectUuid||"",rawText:x.rawText||"",title:document.getElementById("clarifyTitle")?.value.trim()||x.title||"",commitmentType:clarifyType(),direction:clarifyDirection(),personName:document.getElementById("clarifyPerson")?.value.trim()||"",locationName:document.getElementById("clarifyLocation")?.value.trim()||"",date:document.getElementById("clarifyDate")?.value||"",time:document.getElementById("clarifyTime")?.value||"",plannedHours:document.getElementById("clarifyHours")?.disabled?"":(document.getElementById("clarifyHours")?.value||""),intent:(document.getElementById("clarifyIntent")?.value.trim()||clarifyType()).toUpperCase()};}
+async function saveClarify(d){const r=await submitMutationAndWait("clarify-inbox",d);if(r.status!=="clarified")throw new Error(r.error||r.message||"Clarification failed.");return r;}
+async function clarifyToTask(id){const d=collectClarify(id);try{await saveClarify(d);closeInboxClarifySheet();captureEntryMode="interpreted";interpretedCaptureDraft={sourceText:d.rawText,title:d.title,role:"",project:"",priority:"Medium",plannedHours:d.plannedHours,date:d.date,time:d.time,location:d.locationName,personName:d.personName,intent:d.intent,description:d.rawText,confidence:.99,parserVersion:"clarified-v1.8.1",sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid};render("capture",true);}catch(e){alert(e.message||e);}}
+async function clarifyToCommitment(id){const d=collectClarify(id);try{await saveClarify(d);const r=await submitMutationAndWait("create-commitment",{title:d.title,commitmentType:d.commitmentType,direction:d.direction,personName:d.personName,dueDate:d.date,sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid,rawText:d.rawText,parserVersion:"clarified-v1.8.1"});if(r.status!=="commitment_created")throw new Error(r.error||r.message||"Commitment failed.");closeInboxClarifySheet();liveInboxLoaded=false;liveCommitmentsLoaded=false;await Promise.all([loadLiveInboxData(false),loadLiveCommitmentsData(false)]);render("commitments",true);}catch(e){alert(e.message||e);}}
 async function createTaskFromForm(){
   if(createTaskInFlight) return false;
 
@@ -1545,9 +1531,8 @@ async function loadLiveCommitmentsData(force=false){
   if(!mobileBridge.endpoint)return false;if(liveCommitmentsLoading||(liveCommitmentsLoaded&&!force))return liveCommitmentsData;liveCommitmentsLoading=true;liveCommitmentsError=null;
   try{const p={action:'commitments'};if(mobileBridge.key)p.key=mobileBridge.key;const x=await jsonpRequest(mobileBridge.endpoint,p,12000,'Commitments data');if(!x||x.ok!==true)throw new Error(x?.error||'Could not load Commitments.');liveCommitmentsData=x.data||{summary:{open:0,waiting:0,closure:0,overdue:0},items:[]};liveCommitmentsLoaded=true;return liveCommitmentsData;}catch(err){liveCommitmentsError=err;throw err;}finally{liveCommitmentsLoading=false;}
 }
-function inboxRows(){const items=liveInboxData?.items||[];if(liveInboxError)return `<div class="empty-card"><strong>Inbox unavailable</strong><small>${escapeHtml(liveInboxError.message||String(liveInboxError))}</small></div>`;if(!items.length)return `<div class="empty-card"><strong>Inbox clear</strong><small>New captures will wait here until you clarify them.</small></div>`;return items.map(x=>`<article class="inbox-row"><div class="inbox-topline"><span class="source">${escapeHtml(x.source||'CAPTURE')}</span><span class="commitment-pill">${escapeHtml(x.commitmentType||'DO')}</span></div><h3>${escapeHtml(x.title||x.rawText)}</h3><p>${escapeHtml(x.rawText||'')}</p><div class="meta">${escapeHtml([x.personName,x.date,x.time].filter(Boolean).join(' · '))}</div><div class="inbox-actions"><button data-inbox-task="${escapeHtml(x.inboxId)}">Create task</button><button data-inbox-commitment="${escapeHtml(x.inboxId)}">Commitment</button><button data-inbox-dismiss="${escapeHtml(x.inboxId)}">Dismiss</button></div></article>`).join('');}
-function commitmentRows(){const items=liveCommitmentsData?.items||[];if(liveCommitmentsError)return `<div class="empty-card"><strong>Commitments unavailable</strong><small>${escapeHtml(liveCommitmentsError.message||String(liveCommitmentsError))}</small></div>`;if(!items.length)return `<div class="empty-card"><strong>No open commitments</strong><small>Promoted Inbox commitments will appear here.</small></div>`;return items.map(x=>`<article class="commitment-card"><div class="state">${escapeHtml(x.type||'DO')}</div><h3>${escapeHtml(x.title||x.commitmentId)}</h3><p>${escapeHtml([x.direction?`Direction: ${x.direction}`:'',x.personName?`With: ${x.personName}`:''].filter(Boolean).join(' · '))}</p><div class="meta">${escapeHtml(x.dueDate?`Due ${x.dueDate}`:'No due date')}</div></article>`).join('');}
-
+function inboxRows(){const items=liveInboxData?.items||[];if(!items.length)return `<div class="empty-card"><strong>Inbox clear</strong></div>`;return items.map(x=>`<article class="inbox-row"><div class="inbox-topline"><span class="source">${escapeHtml(x.source||"CAPTURE")}</span><span class="commitment-pill">${escapeHtml(x.commitmentType||"DO")}</span></div><h3>${escapeHtml(x.title||x.rawText)}</h3><p>${escapeHtml(x.rawText||"")}</p><div class="meta">${escapeHtml([x.personName,x.locationName,x.date,x.time].filter(Boolean).join(" · "))}</div><div class="inbox-actions one-action"><button class="primary-btn compact" data-inbox-clarify="${escapeHtml(x.inboxId)}">Clarify</button></div></article>`).join("");}
+function commitmentRows(){const items=liveCommitmentsData?.items||[],filtered=activeCommitmentFilter==="ALL"?items:items.filter(x=>String(x.type||"DO").toUpperCase()===activeCommitmentFilter);if(!filtered.length)return `<div class="empty-card"><strong>No ${escapeHtml(activeCommitmentFilter==="ALL"?"open":activeCommitmentFilter)} commitments</strong></div>`;return filtered.map(x=>`<article class="commitment-card"><div class="state">${escapeHtml(x.type||"DO")}</div><h3>${escapeHtml(x.title||x.commitmentId)}</h3><p>${escapeHtml(x.direction?`Direction: ${x.direction}`:"")}</p></article>`).join("");}
 function home(){
   const [g,title,sub]=greeting();
   const hd=liveHomeData;
@@ -1682,12 +1667,7 @@ function year(){
   const right=`<section class="section"><div class="section-head"><div><span class="kicker">2026</span><h2>Year at a glance</h2></div></div><div class="month-grid">${cards}</div></section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
-function commitments(){
-  const s=liveCommitmentsData?.summary||{open:0,waiting:0,closure:0,overdue:0};
-  const left=intro('COMMITMENTS','Close the loops.','Commitments are classified as DO, MEET, WAIT, DELEGATE or DECIDE.',`<button class="primary-btn" data-route="capture" data-capture-mode="commitment">Capture commitment</button>`,'champagne');
-  const right=`<section class="section"><div class="metric-grid"><article class="metric-card"><small>OPEN LOOPS</small><strong>${s.open}</strong></article><article class="metric-card"><small>WAITING</small><strong>${s.waiting}</strong></article><article class="metric-card"><small>CLOSURE</small><strong>${s.closure}</strong></article><article class="metric-card"><small>OVERDUE</small><strong>${s.overdue}</strong></article></div><div class="section-head" style="margin-top:20px"><div><span class="kicker">OPEN LOOPS</span><h2>Commitments</h2></div></div><div class="list">${commitmentRows()}</div></section>`;
-  return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
-}
+function commitments(){const classes=["ALL","DO","MEET","WAIT","DELEGATE","DECIDE"],left=intro("COMMITMENTS","Close the loops.","Review open loops by CICE class.",`<button class="primary-btn" data-route="capture" data-capture-mode="commitment">Capture commitment</button>`,"champagne"),right=`<section class="section"><div class="section-head"><div><span class="kicker">CICE CLASSES</span><h2>Commitments</h2><p>DO · MEET · WAIT · DELEGATE · DECIDE</p></div></div><div class="commitment-filter-strip">${classes.map(c=>`<button type="button" class="commitment-filter ${activeCommitmentFilter===c?"active":""}" data-commitment-filter="${c}">${c}</button>`).join("")}</div><div class="list">${commitmentRows()}</div></section>`;return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;}
 function analytics(){
   const left=intro("ANALYTICS","See the pattern, not just the list.","Useful planning signals only. No decorative dashboard noise.",`<button class="secondary-btn" data-demo="refresh">Refresh insights</button>`);
   const right=`<section class="section"><div class="card-grid">
@@ -1935,6 +1915,7 @@ function render(route,replaceHash=false){
     loadLiveTaskDetailData(selectedTaskId,false);
   }
 }
+document.addEventListener("click",e=>{if(e.target.closest?.("[data-close-inbox-clarify]")){closeInboxClarifySheet();return;}const t=e.target.closest?.("[data-clarify-type]");if(t){document.querySelectorAll("[data-clarify-type]").forEach(x=>x.classList.toggle("selected",x===t));const rec=t.dataset.clarifyType==="WAIT"||t.dataset.clarifyType==="DELEGATE"?"OTHER":t.dataset.clarifyType==="MEET"?"SHARED":t.dataset.clarifyType==="DECIDE"?"ME":null;if(rec)document.querySelectorAll("[data-clarify-direction]").forEach(x=>x.classList.toggle("selected",x.dataset.clarifyDirection===rec));document.getElementById("clarifyIntent").value=t.dataset.clarifyType;updateClarifyRules();return;}const d=e.target.closest?.("[data-clarify-direction]");if(d){document.querySelectorAll("[data-clarify-direction]").forEach(x=>x.classList.toggle("selected",x===d));return;}const ct=e.target.closest?.("[data-clarify-task]");if(ct){clarifyToTask(ct.dataset.clarifyTask);return;}const cc=e.target.closest?.("[data-clarify-commitment]");if(cc){clarifyToCommitment(cc.dataset.clarifyCommitment);return;}const di=e.target.closest?.("[data-clarify-dismiss]");if(di){closeInboxClarifySheet();dismissInboxItem(di.dataset.clarifyDismiss);return;}});
 function bindDynamic(){
   document.querySelectorAll("[data-route]").forEach(el=>{
     el.addEventListener("click",e=>{
@@ -1991,9 +1972,8 @@ function bindDynamic(){
   });
 
   document.getElementById("inboxCaptureForm")?.addEventListener("submit",e=>{e.preventDefault();captureToInbox(document.getElementById("inboxCaptureText")?.value||"");});
-  document.querySelectorAll("[data-inbox-task]").forEach(btn=>btn.addEventListener("click",()=>promoteInboxToTask(btn.dataset.inboxTask)));
-  document.querySelectorAll("[data-inbox-commitment]").forEach(btn=>btn.addEventListener("click",()=>promoteInboxToCommitment(btn.dataset.inboxCommitment)));
-  document.querySelectorAll("[data-inbox-dismiss]").forEach(btn=>btn.addEventListener("click",()=>dismissInboxItem(btn.dataset.inboxDismiss)));
+  document.querySelectorAll("[data-inbox-clarify]").forEach(btn=>btn.addEventListener("click",()=>openInboxClarifySheet(btn.dataset.inboxClarify)));
+  document.querySelectorAll("[data-commitment-filter]").forEach(btn=>btn.addEventListener("click",()=>{activeCommitmentFilter=btn.dataset.commitmentFilter||"ALL";render("commitments",true);}));
 
   document.querySelectorAll("[data-capture-cancel]").forEach(btn=>btn.addEventListener("click",()=>{
     const destination=captureEntryMode==="today" ? "today" : "tasks";
