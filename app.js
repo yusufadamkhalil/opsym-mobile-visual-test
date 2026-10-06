@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.8.2 - PERFORMANCE + RESPONSE OPTIMIZATION
+   Mobile Backend Integration v1.8.2.1 - FAST CAPTURE + PROMOTION ENGINE
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -1016,7 +1016,196 @@ async function finishSuccessfulTaskCreation(result){
 
 function getInboxItem(id){return (liveInboxData?.items||[]).find(x=>x.inboxId===id)||null;}
 function buildInboxDraft(text){const s=interpretCaptureLocally(text),c=classifyCommitmentLocally(text,s),personName=c.counterparty||s.personName||"",intent=["WAIT","DELEGATE","DECIDE"].includes(c.commitmentType)?c.commitmentType:(c.commitmentType==="MEET"?"MEET":s.intent);let plannedHours=s.plannedHours;if(c.commitmentType==="WAIT"||c.commitmentType==="DELEGATE")plannedHours="";return{...s,...c,personName,intent,plannedHours,combinedConfidence:Math.round(((Number(s.confidence||0)+Number(c.commitmentConfidence||0))/2)*100)/100};}
-async function captureToInbox(text){if(inboxCaptureInFlight)return false;text=String(text||"").trim();if(!text){alert("Enter something to capture.");return false;}const d=buildInboxDraft(text);try{await loadLiveInboxData(true);}catch(_){}const norm=v=>String(v||"").toLowerCase().replace(/[^\p{L}\p{N}]+/gu," ").replace(/\s+/g," ").trim(),sim=(x,y)=>{const A=new Set(norm(x).split(" ").filter(Boolean)),B=new Set(norm(y).split(" ").filter(Boolean));if(!A.size||!B.size)return 0;let n=0;A.forEach(t=>{if(B.has(t))n++;});return n/new Set([...A,...B]).size;};let dup=null,score=0;for(const x of(liveInboxData?.items||[])){const q=sim(text,x.rawText||"");if(q>score){score=q;dup=x;}}if(score>=.72&&!confirm(`This looks ${norm(dup.rawText)===norm(text)?"the same as":"very similar to"} ${dup.inboxId}.\n\nPress OK only if this is intentionally a separate occurrence.`)){render("inbox",true);return false;}if(!confirm(`Capture this to Inbox?\n\n${d.title}\n\nType: ${d.commitmentType}\nDirection: ${d.direction}\nPerson: ${d.personName||"Not resolved"}\nDate: ${d.date||"Not resolved"}\nTime: ${d.time||"Not resolved"}`))return false;inboxCaptureInFlight=true;try{let r=await submitMutationAndWait("capture-inbox",{rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",parserVersion:"semantic-local-v2.0+commitment-local-v1.1",forceDuplicate:String(score>=.72),source:"mobile_inbox_capture"});if(r.status==="duplicate"){if(!confirm(`A matching open Inbox item already exists: ${r.existing?.inboxId||"existing item"}.\n\nPress OK to capture another separate copy.`)){liveInboxLoaded=false;await loadLiveInboxData(false);render("inbox",true);return false;}r=await submitMutationAndWait("capture-inbox",{rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",forceDuplicate:"true",source:"mobile_inbox_capture"});}if(r.status!=="captured")throw new Error(r.error||r.message||"Inbox capture was not confirmed.");liveInboxLoaded=false;await loadLiveInboxData(false);render("inbox",true);return true;}catch(err){alert("Could not capture to Inbox:\n"+(err?.message||err));return false;}finally{inboxCaptureInFlight=false;}}
+
+function opsymConfirm({title="Confirm",message="",confirmLabel="Continue",cancelLabel="Cancel"}={}){
+  return new Promise(resolve=>{
+    document.getElementById("opsymConfirmBackdrop")?.remove();
+
+    const wrap=document.createElement("div");
+    wrap.id="opsymConfirmBackdrop";
+    wrap.className="opsym-confirm-backdrop";
+    wrap.innerHTML=`
+      <section class="opsym-confirm-card" role="dialog" aria-modal="true" aria-labelledby="opsymConfirmTitle">
+        <div class="opsym-confirm-mark">✓</div>
+        <h3 id="opsymConfirmTitle">${escapeHtml(title)}</h3>
+        <div class="opsym-confirm-message">${escapeHtml(message).replace(/\n/g,"<br>")}</div>
+        <div class="opsym-confirm-actions">
+          <button type="button" class="ghost-btn" data-confirm-cancel>${escapeHtml(cancelLabel)}</button>
+          <button type="button" class="primary-btn" data-confirm-ok>${escapeHtml(confirmLabel)}</button>
+        </div>
+      </section>`;
+
+    const finish=value=>{
+      wrap.remove();
+      resolve(value);
+    };
+
+    wrap.querySelector("[data-confirm-cancel]")?.addEventListener("click",()=>finish(false));
+    wrap.querySelector("[data-confirm-ok]")?.addEventListener("click",()=>finish(true));
+    wrap.addEventListener("click",e=>{if(e.target===wrap)finish(false);});
+    document.body.appendChild(wrap);
+    requestAnimationFrame(()=>wrap.querySelector("[data-confirm-ok]")?.focus({preventScroll:true}));
+  });
+}
+
+async function captureToInbox(text){
+  if(inboxCaptureInFlight) return false;
+
+  text=String(text||"").trim();
+  if(!text){
+    alert("Enter something to capture.");
+    return false;
+  }
+
+  const d=buildInboxDraft(text);
+  const norm=v=>String(v||"").toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu," ")
+    .replace(/\s+/g," ")
+    .trim();
+
+  const sim=(x,y)=>{
+    const A=new Set(norm(x).split(" ").filter(Boolean));
+    const B=new Set(norm(y).split(" ").filter(Boolean));
+    if(!A.size||!B.size) return 0;
+    let n=0;
+    A.forEach(t=>{if(B.has(t))n++;});
+    return n/new Set([...A,...B]).size;
+  };
+
+  let dup=null,score=0;
+  for(const x of(liveInboxData?.items||[])){
+    const q=sim(text,x.rawText||"");
+    if(q>score){score=q;dup=x;}
+  }
+
+  if(score>=.72){
+    const keep=await opsymConfirm({
+      title:"Possible duplicate",
+      message:`This looks ${norm(dup.rawText)===norm(text)?"the same as":"very similar to"} ${dup.inboxId}.\n\nCreate another separate Inbox item?`,
+      confirmLabel:"Capture anyway",
+      cancelLabel:"Keep existing"
+    });
+
+    if(!keep){
+      render("inbox",true);
+      return false;
+    }
+  }
+
+  const approved=await opsymConfirm({
+    title:"Capture to Inbox",
+    message:`${d.title}\n\nType: ${d.commitmentType}\nDirection: ${d.direction}\nPerson: ${d.personName||"Not resolved"}\nDate: ${d.date||"Not resolved"}\nTime: ${d.time||"Not resolved"}`,
+    confirmLabel:"Capture",
+    cancelLabel:"Cancel"
+  });
+
+  if(!approved) return false;
+
+  inboxCaptureInFlight=true;
+
+  try{
+    let r=await submitMutationAndWait("capture-inbox",{
+      rawText:text,
+      title:d.title,
+      intent:d.intent,
+      commitmentType:d.commitmentType,
+      direction:d.direction,
+      confidence:String(d.combinedConfidence),
+      personName:d.personName||"",
+      locationName:d.location||"",
+      date:d.date||"",
+      time:d.time||"",
+      plannedHours:d.plannedHours||"",
+      parserVersion:"semantic-local-v2.0+commitment-local-v1.1",
+      forceDuplicate:String(score>=.72),
+      source:"mobile_inbox_capture"
+    });
+
+    if(r.status==="duplicate"){
+      const again=await opsymConfirm({
+        title:"Matching Inbox item exists",
+        message:`${r.existing?.inboxId||"An existing item"} already contains this capture.\n\nCreate another separate copy?`,
+        confirmLabel:"Capture another",
+        cancelLabel:"Keep existing"
+      });
+
+      if(!again){
+        render("inbox",true);
+        return false;
+      }
+
+      r=await submitMutationAndWait("capture-inbox",{
+        rawText:text,
+        title:d.title,
+        intent:d.intent,
+        commitmentType:d.commitmentType,
+        direction:d.direction,
+        confidence:String(d.combinedConfidence),
+        personName:d.personName||"",
+        locationName:d.location||"",
+        date:d.date||"",
+        time:d.time||"",
+        plannedHours:d.plannedHours||"",
+        parserVersion:"semantic-local-v2.0+commitment-local-v1.1",
+        forceDuplicate:"true",
+        source:"mobile_inbox_capture"
+      });
+    }
+
+    if(r.status!=="captured"){
+      throw new Error(r.error||r.message||"Inbox capture was not confirmed.");
+    }
+
+    liveInboxData=liveInboxData||{summary:{open:0,total:0},items:[]};
+    liveInboxData.items=liveInboxData.items||[];
+
+    liveInboxData.items.unshift({
+      inboxId:r.inboxId,
+      objectUuid:r.objectUuid||"",
+      captured:new Date().toISOString(),
+      source:"mobile_inbox_capture",
+      rawText:text,
+      title:r.title||d.title,
+      intent:r.intent||d.intent,
+      commitmentType:r.commitmentType||d.commitmentType,
+      direction:r.direction||d.direction,
+      confidence:r.confidence||String(d.combinedConfidence),
+      personName:r.personName||d.personName||"",
+      personUuid:r.personUuid||"",
+      locationName:r.locationName||d.location||"",
+      locationUuid:r.locationUuid||"",
+      date:r.date||d.date||"",
+      time:r.time||d.time||"",
+      plannedHours:r.plannedHours||d.plannedHours||"",
+      status:"Open"
+    });
+
+    liveInboxData.summary=liveInboxData.summary||{};
+    liveInboxData.summary.open=Number(liveInboxData.summary.open||0)+1;
+    liveInboxData.summary.total=Number(liveInboxData.summary.total||0)+1;
+
+    toast(
+      r.timings?.totalMs
+        ? `Captured ${r.inboxId} in ${(r.timings.totalMs/1000).toFixed(1)}s`
+        : `Captured ${r.inboxId}`
+    );
+
+    render("inbox",true);
+
+    liveInboxLoaded=false;
+    loadLiveInboxData(true)
+      .then(()=>{if(currentRoute()==="inbox")render("inbox",true);})
+      .catch(()=>null);
+
+    return true;
+  }catch(err){
+    alert("Could not capture to Inbox:\n"+(err?.message||err));
+    return false;
+  }finally{
+    inboxCaptureInFlight=false;
+  }
+}
+
 function clarifySummaryText(x){
   const parts=[
     String(x.commitmentType||"DO").toUpperCase(),
@@ -1245,7 +1434,13 @@ async function clarifyToCommitment(id){
   const d=collectClarify(id);
   if(!d) return false;
 
-  if(!confirm(`Create this commitment?\n\n${d.title}\n\nType: ${d.commitmentType}\nDirection: ${d.direction}\nPerson: ${d.personName||"Not stated"}`)) return false;
+  const approved=await opsymConfirm({
+    title:"Create Commitment",
+    message:`${d.title}\n\nType: ${d.commitmentType}\nDirection: ${d.direction}\nPerson: ${d.personName||"Not stated"}`,
+    confirmLabel:"Create Commitment",
+    cancelLabel:"Cancel"
+  });
+  if(!approved) return false;
 
   commitmentActionInFlight=true;
   const btn=document.querySelector(`[data-clarify-commitment="${CSS.escape(String(id))}"]`);
@@ -1277,7 +1472,11 @@ async function clarifyToCommitment(id){
       });
     }
 
-    toast(`Created ${r.commitmentId||"commitment"}`);
+    toast(
+      r.timings?.totalMs
+        ? `Created ${r.commitmentId||"commitment"} in ${(r.timings.totalMs/1000).toFixed(1)}s`
+        : `Created ${r.commitmentId||"commitment"}`
+    );
     render("commitments",true);
 
     liveInboxLoaded=false;
