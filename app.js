@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.8.1.3 - CLARIFY FOCUS MODAL HOTFIX
+   Mobile Backend Integration v1.8.2 - PERFORMANCE + RESPONSE OPTIMIZATION
    UI remains frozen. No write actions are enabled.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -784,6 +784,38 @@ function isRequestTimeoutError(err){
 }
 
 
+
+const opsymPostAckWaiters=new Map();
+
+window.addEventListener("message",event=>{
+  const msg=event?.data;
+  if(!msg||msg.source!=="opsym-mobile-bridge") return;
+  const requestId=String(msg.requestId||"");
+  const waiter=opsymPostAckWaiters.get(requestId);
+  if(!waiter) return;
+  opsymPostAckWaiters.delete(requestId);
+  clearTimeout(waiter.timer);
+  waiter.resolve(msg.payload||{});
+});
+
+function waitForPostAck(requestId,timeoutMs=12000){
+  return new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{
+      opsymPostAckWaiters.delete(requestId);
+      reject(new Error("Direct acknowledgement not received."));
+    },timeoutMs);
+    opsymPostAckWaiters.set(requestId,{resolve,reject,timer});
+  });
+}
+
+function submitBridgePostWithAck(params,timeoutMs=12000){
+  const requestId=String(params?.requestId||"").trim();
+  if(!requestId) throw new Error("A request ID is required.");
+  const ack=waitForPostAck(requestId,timeoutMs);
+  submitBridgePost(params);
+  return ack;
+}
+
 function submitBridgePost(params){
   if(!mobileBridge.endpoint){
     throw new Error("Mobile Bridge is not configured.");
@@ -832,31 +864,19 @@ function submitBridgePost(params){
   },60000);
 }
 
-async function waitForCreateRequestStatus(requestId,{
-  timeoutMs=45000,
-  pollMs=1500
-}={}){
+async function waitForCreateRequestStatus(requestId,{timeoutMs=45000}={}){
   const deadline=Date.now()+timeoutMs;
-  let lastError=null;
-
+  const delays=[250,350,500,750,1000,1200];
+  let attempt=0,lastError=null;
   while(Date.now()<deadline){
-    await new Promise(resolve=>setTimeout(resolve,pollMs));
-
+    await new Promise(r=>setTimeout(r,delays[Math.min(attempt++,delays.length-1)]));
     try{
-      const status=await checkCreateRequestStatus(requestId,8000);
-
-      if(status.created || status.blocked || status.status==="error"){
-        return status;
-      }
-    }catch(err){
-      lastError=err;
-    }
+      const s=await checkCreateRequestStatus(requestId,6000);
+      if(s.created||s.blocked||s.status==="error") return s;
+    }catch(e){lastError=e;}
   }
-
-  const suffix=lastError ? ` Last status error: ${lastError.message||lastError}` : "";
-  throw new Error(`Task creation acknowledgement timed out after ${Math.round(timeoutMs/1000)} seconds.${suffix}`);
+  throw new Error(`Task creation acknowledgement timed out.${lastError?` ${lastError.message||lastError}`:""}`);
 }
-
 
 async function checkMutationStatus(requestId,timeoutMs=8000){
   const params={action:"mutation-status",requestId};
@@ -876,57 +896,40 @@ async function checkMutationStatus(requestId,timeoutMs=8000){
   return payload.data || {};
 }
 
-async function waitForMutationStatus(requestId,{
-  timeoutMs=45000,
-  pollMs=1500
-}={}){
+async function waitForMutationStatus(requestId,{timeoutMs=45000}={}){
   const deadline=Date.now()+timeoutMs;
-  let lastError=null;
-
+  const delays=[250,350,500,750,1000,1200];
+  let attempt=0,lastError=null;
   while(Date.now()<deadline){
-    await new Promise(resolve=>setTimeout(resolve,pollMs));
-
+    await new Promise(r=>setTimeout(r,delays[Math.min(attempt++,delays.length-1)]));
     try{
-      const status=await checkMutationStatus(requestId,8000);
-      if(
-        status.status==="completed" ||
-        status.status==="rescheduled" ||
-        status.status==="blocked" ||
-        status.status==="captured" ||
-        status.status==="duplicate" ||
-        status.status==="commitment_created" ||
-        status.status==="resolved" ||
-        status.status==="clarified" ||
-        status.status==="error"
-      ){
-        return status;
-      }
-    }catch(err){
-      lastError=err;
-    }
+      const s=await checkMutationStatus(requestId,6000);
+      if([
+        "completed","rescheduled","blocked","captured","duplicate",
+        "commitment_created","resolved","clarified",
+        "promoted_task","promoted_commitment","error"
+      ].includes(s.status)) return s;
+    }catch(e){lastError=e;}
   }
-
-  const suffix=lastError ? ` Last status error: ${lastError.message||lastError}` : "";
-  throw new Error(`Write acknowledgement timed out after ${Math.round(timeoutMs/1000)} seconds.${suffix}`);
+  throw new Error(`Write acknowledgement timed out.${lastError?` ${lastError.message||lastError}`:""}`);
 }
 
 async function submitMutationAndWait(action,fields){
-  if(!mobileBridge.endpoint){
-    throw new Error("Mobile Bridge is not configured.");
-  }
-
+  if(!mobileBridge.endpoint) throw new Error("Mobile Bridge is not configured.");
   const requestId=createClientRequestId().replace(/^create-/,"mutation-");
   const params={action,requestId,...fields};
   if(mobileBridge.key) params.key=mobileBridge.key;
 
-  submitBridgePost(params);
+  try{
+    const ack=await submitBridgePostWithAck(params,12000);
+    if(ack?.ok===false) throw new Error(ack.error||"Write failed.");
+    if(ack?.ok===true&&ack.data) return {...ack.data,requestId,directAck:true};
+  }catch(e){
+    if(!/acknowledgement not received/i.test(String(e?.message||e))) throw e;
+  }
 
-  const result=await waitForMutationStatus(requestId,{
-    timeoutMs:45000,
-    pollMs:1500
-  });
-
-  return {...result,requestId};
+  const result=await waitForMutationStatus(requestId,{timeoutMs:45000});
+  return {...result,requestId,directAck:false};
 }
 
 async function testWriteGateway(){
@@ -981,22 +984,34 @@ async function checkCreateRequestStatus(requestId,timeoutMs=8000){
 }
 
 async function finishSuccessfulTaskCreation(result){
-  toast(`Created ${result.taskId || "task"}`);
+  toast(`Created ${result.taskId||"task"}`);
+  const destination=captureEntryMode==="today"?"today":"tasks";
+  const sourceInboxId=interpretedCaptureDraft?.sourceInboxId||"";
 
-  liveHomeLoaded=false;
-  liveTodayLoaded=false;
-  liveTasksLoaded=false;
+  if(sourceInboxId&&liveInboxData?.items){
+    liveInboxData.items=liveInboxData.items.filter(x=>x.inboxId!==sourceInboxId);
+    if(liveInboxData.summary) liveInboxData.summary.open=Math.max(0,Number(liveInboxData.summary.open||0)-1);
+  }
 
-  await Promise.all([
-    loadLiveHomeData(false),
-    loadLiveTodayData(false),
-    loadLiveTasksData(false)
-  ]);
-
-  const destination=captureEntryMode==="today" ? "today" : "tasks";
   captureEntryMode="general";
   interpretedCaptureDraft=null;
   render(destination,true);
+
+  liveTasksLoaded=false;
+  loadLiveTasksData(true).then(()=>{if(currentRoute()==="tasks")render("tasks",true);}).catch(()=>null);
+
+  liveTodayLoaded=false;
+  if(destination==="today"){
+    loadLiveTodayData(true).then(()=>{if(currentRoute()==="today")render("today",true);}).catch(()=>null);
+  }
+
+  liveHomeLoaded=false;
+  loadLiveHomeData(true).catch(()=>null);
+
+  if(sourceInboxId){
+    liveInboxLoaded=false;
+    loadLiveInboxData(true).catch(()=>null);
+  }
 }
 
 function getInboxItem(id){return (liveInboxData?.items||[]).find(x=>x.inboxId===id)||null;}
@@ -1207,8 +1222,78 @@ function updateClarifyRules(){
 }
 function collectClarify(id){const x=getInboxItem(id);return{inboxId:id,inboxUuid:x.objectUuid||"",rawText:x.rawText||"",title:document.getElementById("clarifyTitle")?.value.trim()||x.title||"",commitmentType:clarifyType(),direction:clarifyDirection(),personName:document.getElementById("clarifyPerson")?.value.trim()||"",locationName:document.getElementById("clarifyLocation")?.value.trim()||"",date:document.getElementById("clarifyDate")?.value||"",time:document.getElementById("clarifyTime")?.value||"",plannedHours:document.getElementById("clarifyHours")?.disabled?"":(document.getElementById("clarifyHours")?.value||""),intent:(document.getElementById("clarifyIntent")?.value.trim()||clarifyType()).toUpperCase()};}
 async function saveClarify(d){const r=await submitMutationAndWait("clarify-inbox",d);if(r.status!=="clarified")throw new Error(r.error||r.message||"Clarification failed.");return r;}
-async function clarifyToTask(id){const d=collectClarify(id);try{await saveClarify(d);closeInboxClarifySheet();captureEntryMode="interpreted";interpretedCaptureDraft={sourceText:d.rawText,title:d.title,role:"",project:"",priority:"Medium",plannedHours:d.plannedHours,date:d.date,time:d.time,location:d.locationName,personName:d.personName,intent:d.intent,description:d.rawText,confidence:.99,parserVersion:"clarified-v1.8.1",sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid};render("capture",true);}catch(e){alert(e.message||e);}}
-async function clarifyToCommitment(id){const d=collectClarify(id);try{await saveClarify(d);const r=await submitMutationAndWait("create-commitment",{title:d.title,commitmentType:d.commitmentType,direction:d.direction,personName:d.personName,dueDate:d.date,sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid,rawText:d.rawText,parserVersion:"clarified-v1.8.1"});if(r.status!=="commitment_created")throw new Error(r.error||r.message||"Commitment failed.");closeInboxClarifySheet();liveInboxLoaded=false;liveCommitmentsLoaded=false;await Promise.all([loadLiveInboxData(false),loadLiveCommitmentsData(false)]);render("commitments",true);}catch(e){alert(e.message||e);}}
+async function clarifyToTask(id){
+  const d=collectClarify(id);
+  if(!d) return false;
+
+  closeInboxClarifySheet();
+  captureEntryMode="interpreted";
+  interpretedCaptureDraft={
+    sourceText:d.rawText,title:d.title,role:"",project:"",priority:"Medium",
+    plannedHours:d.plannedHours,date:d.date,time:d.time,location:d.locationName,
+    personName:d.personName,intent:d.intent,commitmentType:d.commitmentType,
+    direction:d.direction,description:d.rawText,confidence:.99,
+    parserVersion:"clarified-v1.8.2",
+    sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid
+  };
+  render("capture",true);
+  return true;
+}
+
+async function clarifyToCommitment(id){
+  if(commitmentActionInFlight) return false;
+  const d=collectClarify(id);
+  if(!d) return false;
+
+  if(!confirm(`Create this commitment?\n\n${d.title}\n\nType: ${d.commitmentType}\nDirection: ${d.direction}\nPerson: ${d.personName||"Not stated"}`)) return false;
+
+  commitmentActionInFlight=true;
+  const btn=document.querySelector(`[data-clarify-commitment="${CSS.escape(String(id))}"]`);
+  if(btn){btn.disabled=true;btn.textContent="Creating…";}
+
+  try{
+    const r=await submitMutationAndWait("promote-inbox-commitment",{
+      inboxId:d.inboxId,inboxUuid:d.inboxUuid,rawText:d.rawText,title:d.title,
+      commitmentType:d.commitmentType,direction:d.direction,personName:d.personName,
+      locationName:d.locationName,date:d.date,time:d.time,
+      plannedHours:d.plannedHours,intent:d.intent,confidence:"1.0"
+    });
+
+    if(r.status!=="promoted_commitment") throw new Error(r.error||r.message||"Commitment promotion failed.");
+
+    closeInboxClarifySheet();
+
+    if(liveInboxData?.items){
+      liveInboxData.items=liveInboxData.items.filter(x=>x.inboxId!==d.inboxId);
+      if(liveInboxData.summary) liveInboxData.summary.open=Math.max(0,Number(liveInboxData.summary.open||0)-1);
+    }
+
+    if(liveCommitmentsData){
+      liveCommitmentsData.items=liveCommitmentsData.items||[];
+      liveCommitmentsData.items.unshift({
+        commitmentId:r.commitmentId,objectUuid:r.objectUuid||"",title:r.title||d.title,
+        type:r.commitmentType||d.commitmentType,direction:r.direction||d.direction,
+        personName:r.personName||d.personName,dueDate:r.dueDate||d.date,status:"Open"
+      });
+    }
+
+    toast(`Created ${r.commitmentId||"commitment"}`);
+    render("commitments",true);
+
+    liveInboxLoaded=false;
+    liveCommitmentsLoaded=false;
+    loadLiveInboxData(true).catch(()=>null);
+    loadLiveCommitmentsData(true).then(()=>{if(currentRoute()==="commitments")render("commitments",true);}).catch(()=>null);
+    return true;
+  }catch(e){
+    alert(e.message||e);
+    return false;
+  }finally{
+    commitmentActionInFlight=false;
+    if(btn){btn.disabled=false;btn.textContent="Create Commitment";}
+  }
+}
+
 async function createTaskFromForm(){
   if(createTaskInFlight) return false;
 
@@ -1252,8 +1337,9 @@ async function createTaskFromForm(){
       ? interpretedCaptureDraft
       : null;
 
+    const fromInbox=!!semanticDraft?.sourceInboxId;
     const params={
-      action:"create-task",
+      action:fromInbox?"promote-inbox-task":"create-task",
       requestId,
       title,role,project,priority,
       plannedHours,date,time,location,description,
@@ -1264,19 +1350,34 @@ async function createTaskFromForm(){
       captureConfidence: semanticDraft ? String(semanticDraft.confidence ?? "") : "",
       personName: semanticDraft?.personName || "",
       sourceInboxId: semanticDraft?.sourceInboxId || "",
-      sourceInboxUuid: semanticDraft?.sourceInboxUuid || ""
+      sourceInboxUuid: semanticDraft?.sourceInboxUuid || "",
+      inboxId: semanticDraft?.sourceInboxId || "",
+      inboxUuid: semanticDraft?.sourceInboxUuid || "",
+      commitmentType: semanticDraft?.commitmentType || "",
+      direction: semanticDraft?.direction || "",
+      intent: semanticDraft?.intent || "",
+      locationName: location,
+      rawText: semanticDraft?.sourceText || ""
     };
     if(mobileBridge.key) params.key=mobileBridge.key;
 
-    // v1.7.4: write payload travels via POST, not JSONP GET.
-    submitBridgePost(params);
-
     let result;
     try{
-      result=await waitForCreateRequestStatus(requestId,{
-        timeoutMs:45000,
-        pollMs:1500
-      });
+      if(fromInbox){
+        const fields={...params};
+        delete fields.action;
+        delete fields.requestId;
+        result=await submitMutationAndWait("promote-inbox-task",fields);
+      }else{
+        try{
+          const ack=await submitBridgePostWithAck(params,12000);
+          if(ack?.ok===false) throw new Error(ack.error||"Task creation failed.");
+          if(ack?.ok===true&&ack.data) result=ack.data;
+        }catch(ackErr){
+          if(!/acknowledgement not received/i.test(String(ackErr?.message||ackErr))) throw ackErr;
+          result=await waitForCreateRequestStatus(requestId,{timeoutMs:45000});
+        }
+      }
     }catch(err){
       alert(
         "Task creation could not be confirmed.\n\n"+
@@ -1300,7 +1401,7 @@ async function createTaskFromForm(){
       return false;
     }
 
-    if(!result.created){
+    if(!(result.created || result.status==="promoted_task")){
       throw new Error(result.message || "The task was not verified as created.");
     }
 

@@ -1304,3 +1304,6 @@ body.opsym-modal-open{
     border-radius:20px !important;
   }
 }
+
+/* v1.8.2 performance feedback */
+.clarify-final-btn:disabled,.primary-btn:disabled,.ghost-btn:disabled{opacity:.62;cursor:wait}
