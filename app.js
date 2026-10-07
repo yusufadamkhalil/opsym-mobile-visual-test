@@ -360,7 +360,7 @@ function detectSharedSource({title="",text="",url=""}={}){
 function readShareTargetFromUrl(){
   try{
     const q=new URLSearchParams(location.search);
-    if(q.get("share_target")!=="1" && !q.has("text") && !q.has("url"))return null;
+    if(q.get("share_target")!=="1" && !q.has("text") && !q.has("url") && !q.has("title"))return null;
     const title=String(q.get("title")||"").trim();
     const text=String(q.get("text")||"").trim();
     const url=String(q.get("url")||"").trim();
@@ -2310,11 +2310,14 @@ async function showPwaDiagnostics(){
   const controlled=!!navigator.serviceWorker?.controller;
   const q=new URLSearchParams(location.search);
   const shareLaunch=q.get("share_target")==="1" || q.has("text") || q.has("url") || q.has("title");
+  let manifestShareTarget="UNKNOWN";
+  try{const mr=await fetch("./manifest.webmanifest?v=1902",{cache:"no-store"});const mj=await mr.json();manifestShareTarget=mj?.share_target?.action?"DECLARED":"MISSING";}catch(_){manifestShareTarget="UNREADABLE";}
   const lines=[
     `Installed/standalone mode: ${standalone?"YES":"NO"}`,
     `Service worker supported: ${swSupported?"YES":"NO"}`,
     `Service worker registered: ${registration?"YES":"NO"}`,
     `Page controlled by worker: ${controlled?"YES":"NO"}`,
+    `Manifest share target: ${manifestShareTarget}`,
     `Share payload detected on this launch: ${shareLaunch?"YES":"NO"}`,
     `Manifest: ${manifestLink}`
   ];
@@ -2725,7 +2728,7 @@ document.querySelectorAll(".brand,.top-actions [data-route],.bottom-nav [data-ro
 window.addEventListener("popstate",()=>render(location.hash.replace("#","")||"home",true));
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>render(location.hash.replace("#","")||"home",true));
 
-if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1901",{scope:"./"});await reg.update();}catch(_){}});}
+if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1902",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
 pendingSharedCapture=readShareTargetFromUrl();
 if(pendingSharedCapture) applyPendingSharedCapture();
 
