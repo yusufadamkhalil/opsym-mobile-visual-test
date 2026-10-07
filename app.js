@@ -47,11 +47,11 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.8.4 - LIVE STATE + FAST TASK ENGINE
+   Mobile Backend Integration v1.8.5 - FINAL RELIABILITY + TRANSACTION INTEGRITY
    Approved visual UI retained. Write interactions use non-blocking acknowledgement states.
 -------------------------------------------------------- */
-let liveHomeData = null;
-let liveHomeLoaded = false;
+let liveHomeData = (()=>{try{return JSON.parse(localStorage.getItem("opsym_home_snapshot_v185")||"null");}catch(_){return null;}})();
+let liveHomeLoaded = !!liveHomeData;
 let liveHomeError = null;
 
 let liveTodayData = null;
@@ -80,7 +80,7 @@ let liveCommitmentsLoaded=false, liveCommitmentsLoading=false, liveCommitmentsDa
 let inboxCaptureInFlight=false, commitmentActionInFlight=false;
 let activeCommitmentFilter="ALL";
 let selectedCommitmentId="";
-let liveHomeLastUpdatedAt=0;
+let liveHomeLastUpdatedAt=(()=>{try{return Number(localStorage.getItem("opsym_home_snapshot_at_v185")||0)||0;}catch(_){return 0;}})();
 const pendingTaskRequests=new Map();
 let activeOperationToken="";
 let activeOperationTimers=[];
@@ -174,6 +174,7 @@ async function loadLiveHomeData(showFailureToast=false){
     liveHomeLoaded=!!liveHomeData;
     liveHomeLastUpdatedAt=Date.now();
     liveHomeError=null;
+    try{localStorage.setItem("opsym_home_snapshot_v185",JSON.stringify(liveHomeData));localStorage.setItem("opsym_home_snapshot_at_v185",String(liveHomeLastUpdatedAt));}catch(_){}
     if(liveHomeData?.planningMode) planningMode=liveHomeData.planningMode;
     if(currentRoute()==="home") render("home",true);
     return true;
@@ -188,7 +189,7 @@ async function loadLiveHomeData(showFailureToast=false){
 
 function invalidateLiveViews(...views){
   const set=new Set(views.flat().map(x=>String(x||"").toLowerCase()));
-  if(set.has("home")){liveHomeLoaded=false;}
+  if(set.has("home")){/* keep last-known-good snapshot visible; background refresh will replace it */}
   if(set.has("today")){liveTodayLoaded=false;}
   if(set.has("tasks")){liveTasksLoaded=false;}
   if(set.has("inbox")){liveInboxLoaded=false;}
@@ -883,7 +884,7 @@ function submitBridgePost(params){
   },60000);
 }
 
-async function waitForCreateRequestStatus(requestId,{timeoutMs=45000}={}){
+async function waitForCreateRequestStatus(requestId,{timeoutMs=30000}={}){
   const deadline=Date.now()+timeoutMs;
   const delays=[250,350,500,750,1000,1200];
   let attempt=0,lastError=null;
@@ -915,7 +916,7 @@ async function checkMutationStatus(requestId,timeoutMs=8000){
   return payload.data || {};
 }
 
-async function waitForMutationStatus(requestId,{timeoutMs=45000}={}){
+async function waitForMutationStatus(requestId,{timeoutMs=30000}={}){
   const deadline=Date.now()+timeoutMs;
   const delays=[250,350,500,750,1000,1200];
   let attempt=0,lastError=null;
@@ -1127,7 +1128,7 @@ function endOperation(token,message=""){if(token&&activeOperationToken!==token)r
 function recordOpsymPerf(eventName,data={}){
   try{
     const record={event:eventName,at:new Date().toISOString(),...data};
-    console.info("[Op-Sym v1.8.4 perf]",record);
+    console.info("[Op-Sym v1.8.5 perf]",record);
     const key="opsym_perf_v184";
     const current=JSON.parse(localStorage.getItem(key)||"[]");
     current.push(record);
@@ -1159,7 +1160,7 @@ async function captureToInbox(text){
     if(!keep){render("inbox",true);return false;}
   }
 
-  // v1.8.4: Capture remains deliberately frictionless. The Capture button itself is the user's intent.
+  // v1.8.5: Capture remains deliberately frictionless. The Capture button itself is the user's intent.
   // Show the object immediately while the server write is being confirmed.
   const requestId=createClientRequestId().replace(/^create-/,"mutation-");
   liveInboxData=liveInboxData||{summary:{open:0,total:0},items:[]};
@@ -1448,7 +1449,7 @@ async function clarifyToTask(id){
     plannedHours:d.commitmentType==="WAIT"?"":d.plannedHours,date:d.date,time:d.time,location:d.locationName,
     personName:d.personName,intent:d.intent,commitmentType:d.commitmentType,
     direction:d.direction,description:d.commitmentType==="WAIT"?`Waiting-for source: ${d.rawText}`:d.rawText,confidence:.99,
-    parserVersion:"clarified-v1.8.4",
+    parserVersion:"clarified-v1.8.5",
     sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid
   };
   render("capture",true);
@@ -1462,7 +1463,7 @@ async function clarifyToCommitment(id){
   if(!d) return false;
 
   // The clarification sheet is already the deliberate review step.
-  // v1.8.4 retains the no-redundant-confirmation rule.
+  // v1.8.5 retains the no-redundant-confirmation rule.
   commitmentActionInFlight=true;
   const btn=document.querySelector(`[data-clarify-commitment="${CSS.escape(String(id))}"]`);
   if(btn){btn.disabled=true;btn.textContent="Creating…";}
@@ -1485,8 +1486,10 @@ async function clarifyToCommitment(id){
     }
     liveCommitmentsData=liveCommitmentsData||{summary:{open:0,waiting:0,closure:0,overdue:0},items:[]};
     liveCommitmentsData.items=liveCommitmentsData.items||[];
-    liveCommitmentsData.items.unshift({commitmentId:r.commitmentId,objectUuid:r.objectUuid||"",title:r.title||d.title,type:r.commitmentType||d.commitmentType,direction:r.direction||d.direction,personName:r.personName||d.personName,dueDate:r.dueDate||d.date,status:"Open"});
-    if(liveCommitmentsData.summary) liveCommitmentsData.summary.open=Number(liveCommitmentsData.summary.open||0)+1;
+    if(!liveCommitmentsData.items.some(x=>String(x.commitmentId||"")===String(r.commitmentId||""))){
+      liveCommitmentsData.items.unshift({commitmentId:r.commitmentId,objectUuid:r.objectUuid||"",title:r.title||d.title,type:r.commitmentType||d.commitmentType,direction:r.direction||d.direction,personName:r.personName||d.personName,dueDate:r.dueDate||d.date,status:"Open"});
+      if(liveCommitmentsData.summary) liveCommitmentsData.summary.open=Number(liveCommitmentsData.summary.open||0)+1;
+    }
 
     endOperation(op,"Commitment created");
     recordOpsymPerf("promote-inbox-commitment",{clientMs:Math.round(performance.now()-clientT0),server:r.timings||null,directAck:!!r.directAck,reconciled:!!r.reconciled});
@@ -1554,11 +1557,11 @@ async function createTaskFromForm(){
   };
   if(mobileBridge.key) params.key=mobileBridge.key;
 
-  // v1.8.4: optimistic task creation. The user leaves the form immediately.
+  // v1.8.5: optimistic task creation with bounded verification. The user leaves the form immediately.
   createTaskInFlight=true;
   liveTasksData=liveTasksData||{summary:{open:0,today:0,unscheduled:0,clashes:0},tasks:[]};
   liveTasksData.tasks=liveTasksData.tasks||[];
-  const provisional={taskId:provisionalId,pending:true,pendingRequestId:requestId,title,status:"Saving",priority,role,project,location,description,plannedHours,scheduledDate:date,startTime:time,isToday,isUnscheduled:!date,hasClash:false,meta:[role,priority?priority+" priority":"",date?(isToday?"Today":date):"Unscheduled"].filter(Boolean).join(" · ")};
+  const provisional={taskId:provisionalId,pending:true,pendingRequestId:requestId,pendingStartedAt:Date.now(),title,status:"Saving",priority,role,project,location,description,plannedHours,scheduledDate:date,startTime:time,isToday,isUnscheduled:!date,hasClash:false,meta:[role,priority?priority+" priority":"",date?(isToday?"Today":date):"Unscheduled"].filter(Boolean).join(" · ")};
   liveTasksData.tasks.unshift(provisional);
   liveTasksData.summary.open=Number(liveTasksData.summary.open||0)+1;
   if(isToday) liveTasksData.summary.today=Number(liveTasksData.summary.today||0)+1;
@@ -1584,7 +1587,7 @@ async function createTaskFromForm(){
       let result;
       if(fromInbox){
         const fields={...params};delete fields.action;delete fields.requestId;
-        result=await submitMutationAndWait("promote-inbox-task",fields,{requestId:requestId.replace(/^create-/,"mutation-"),timeoutMs:70000});
+        result=await submitMutationAndWait("promote-inbox-task",fields,{requestId:requestId.replace(/^create-/,"mutation-"),timeoutMs:30000});
       }else{
         try{
           const ack=await submitBridgePostWithAck(params,8000);
@@ -1592,7 +1595,7 @@ async function createTaskFromForm(){
           if(ack?.ok===true&&ack.data) result=ack.data;
         }catch(ackErr){
           if(!/acknowledgement not received/i.test(String(ackErr?.message||ackErr))) throw ackErr;
-          result=await waitForCreateRequestStatus(requestId,{timeoutMs:70000});
+          result=await waitForCreateRequestStatus(requestId,{timeoutMs:30000});
         }
       }
       if(result?.status==="error") throw new Error(result.error||result.message||"Task creation failed.");
@@ -1647,7 +1650,7 @@ function markPendingTaskFailed_(requestId,message){
 function retryFailedTask_(requestId){
   const x=(liveTasksData?.tasks||[]).find(t=>t.pendingRequestId===requestId);
   if(!x)return;
-  interpretedCaptureDraft={title:x.title||"",sourceText:x.description||x.title||"",role:x.role||"",project:x.project||"",priority:x.priority||"Medium",plannedHours:x.plannedHours||"",date:x.scheduledDate||"",time:x.startTime||"",location:x.location||"",personName:"",intent:"DO",commitmentType:"DO",direction:"ME",parserVersion:"retry-v1.8.4",confidence:1};
+  interpretedCaptureDraft={title:x.title||"",sourceText:x.description||x.title||"",role:x.role||"",project:x.project||"",priority:x.priority||"Medium",plannedHours:x.plannedHours||"",date:x.scheduledDate||"",time:x.startTime||"",location:x.location||"",personName:"",intent:"DO",commitmentType:"DO",direction:"ME",parserVersion:"retry-v1.8.5",confidence:1};
   removePendingTask_(requestId);
   captureEntryMode="interpreted";
   render("capture");
@@ -2020,6 +2023,14 @@ function timelineRows(){
     <span><strong>${escapeHtml(x.title)}</strong><small>${escapeHtml(x.meta || "Op-Sym task")}</small></span><span class="row-arrow">›</span>
   </button>`).join("");
 }
+function pendingTaskState_(t){
+  const age=Math.max(0,Date.now()-Number(t.pendingStartedAt||Date.now()));
+  if(age<5000)return {pill:"Saving…",detail:"Saving securely in the background…"};
+  if(age<15000)return {pill:"Still saving…",detail:"Op-Sym is still completing the secure write."};
+  if(age<30000)return {pill:"Taking longer…",detail:"This is taking longer than usual. Op-Sym is checking the result."};
+  return {pill:"Checking status…",detail:"Final verification is in progress."};
+}
+
 function taskCards(){
   const liveItems=filteredLiveTasks();
   const items=liveItems===null ? data.tasks : liveItems;
@@ -2034,10 +2045,10 @@ function taskCards(){
     return `<div class="empty-card"><strong>${labels[activeTaskFilter] || labels.all}</strong><small>This view is currently clear.</small></div>`;
   }
 
-  return items.map(t=>`<article class="task-card ${t.pending?"is-pending":""}" data-pending-request="${escapeHtml(t.pendingRequestId||"")}">
-    <div class="task-top"><div><h3>${escapeHtml(t.title)}</h3><div class="meta">${escapeHtml(t.meta || "")}</div></div><span class="pill">${escapeHtml(t.pending?"Saving…":(t.status || "Open"))}</span></div>
-    ${t.pending?`<div class="pending-inline"><span class="opsym-operation-spinner" aria-hidden="true"></span><span>Saving securely in the background…</span></div>`:t.saveFailed?`<div class="task-actions"><button type="button" data-retry-failed-task="${escapeHtml(t.pendingRequestId||"")}">Retry</button><button type="button" data-dismiss-failed-task="${escapeHtml(t.pendingRequestId||"")}">Dismiss</button></div>`:`<div class="task-actions"><button class="done" data-complete-task="${escapeHtml(t.taskId || "")}" data-task-title="${escapeHtml(t.title || "")}">Complete</button><button data-route="task-detail" data-task-id="${escapeHtml(t.taskId || "")}">Details</button></div>`}
-  </article>`).join("");
+  return items.map(t=>{const ps=t.pending?pendingTaskState_(t):null;return `<article class="task-card ${t.pending?"is-pending":""}" data-pending-request="${escapeHtml(t.pendingRequestId||"")}">
+    <div class="task-top"><div><h3>${escapeHtml(t.title)}</h3><div class="meta">${escapeHtml(t.meta || "")}</div></div><span class="pill">${escapeHtml(t.pending?ps.pill:(t.status || "Open"))}</span></div>
+    ${t.pending?`<div class="pending-inline"><span class="opsym-operation-spinner" aria-hidden="true"></span><span>${escapeHtml(ps.detail)}</span></div>`:t.saveFailed?`<div class="task-actions"><button type="button" data-retry-failed-task="${escapeHtml(t.pendingRequestId||"")}">Retry</button><button type="button" data-dismiss-failed-task="${escapeHtml(t.pendingRequestId||"")}">Dismiss</button></div>`:`<div class="task-actions"><button class="done" data-complete-task="${escapeHtml(t.taskId || "")}" data-task-title="${escapeHtml(t.title || "")}">Complete</button><button data-route="task-detail" data-task-id="${escapeHtml(t.taskId || "")}">Details</button></div>`}
+  </article>`}).join("");
 }
 
 
@@ -2461,7 +2472,7 @@ document.addEventListener("click",e=>{
   }
 const retryFailed=e.target.closest?.("[data-retry-failed-task]");if(retryFailed){e.preventDefault();retryFailedTask_(retryFailed.dataset.retryFailedTask||"");return;}const dismissFailed=e.target.closest?.("[data-dismiss-failed-task]");if(dismissFailed){e.preventDefault();removePendingTask_(dismissFailed.dataset.dismissFailedTask||"");return;}
 const openCommitment=e.target.closest?.("[data-open-commitment]");if(openCommitment){e.preventDefault();selectedCommitmentId=openCommitment.dataset.openCommitment||"";render("commitment-detail");return;}
-const followCommitment=e.target.closest?.("[data-commitment-followup]");if(followCommitment){e.preventDefault();const c=getCommitmentById(followCommitment.dataset.commitmentFollowup);if(c){const who=c.personName?` with ${c.personName}`:"";interpretedCaptureDraft={title:String(c.type||"").toUpperCase()==="WAIT"?`Follow up${who}`:`Follow up: ${c.title||"commitment"}`,sourceText:c.rawText||c.title||"",role:"",project:"",priority:"Medium",plannedHours:"",date:c.dueDate||"",time:"",location:"",personName:c.personName||"",intent:"DO",commitmentType:"DO",direction:"ME",parserVersion:"commitment-followup-v1.8.4",confidence:.99};captureEntryMode="interpreted";render("capture");}return;}
+const followCommitment=e.target.closest?.("[data-commitment-followup]");if(followCommitment){e.preventDefault();const c=getCommitmentById(followCommitment.dataset.commitmentFollowup);if(c){const who=c.personName?` with ${c.personName}`:"";interpretedCaptureDraft={title:String(c.type||"").toUpperCase()==="WAIT"?`Follow up${who}`:`Follow up: ${c.title||"commitment"}`,sourceText:c.rawText||c.title||"",role:"",project:"",priority:"Medium",plannedHours:"",date:c.dueDate||"",time:"",location:"",personName:c.personName||"",intent:"DO",commitmentType:"DO",direction:"ME",parserVersion:"commitment-followup-v1.8.5",confidence:.99};captureEntryMode="interpreted";render("capture");}return;}
 if(e.target.closest?.("[data-close-inbox-clarify]")){closeInboxClarifySheet();return;}const t=e.target.closest?.("[data-clarify-type]");if(t){document.querySelectorAll("[data-clarify-type]").forEach(x=>x.classList.toggle("selected",x===t));const rec=t.dataset.clarifyType==="WAIT"||t.dataset.clarifyType==="DELEGATE"?"OTHER":t.dataset.clarifyType==="MEET"?"SHARED":t.dataset.clarifyType==="DECIDE"?"ME":null;if(rec)document.querySelectorAll("[data-clarify-direction]").forEach(x=>x.classList.toggle("selected",x.dataset.clarifyDirection===rec));document.getElementById("clarifyIntent").value=t.dataset.clarifyType;updateClarifyRules();return;}const d=e.target.closest?.("[data-clarify-direction]");if(d){document.querySelectorAll("[data-clarify-direction]").forEach(x=>x.classList.toggle("selected",x===d));return;}const ct=e.target.closest?.("[data-clarify-task]");if(ct){clarifyToTask(ct.dataset.clarifyTask);return;}const cc=e.target.closest?.("[data-clarify-commitment]");if(cc){clarifyToCommitment(cc.dataset.clarifyCommitment);return;}const di=e.target.closest?.("[data-clarify-dismiss]");if(di){closeInboxClarifySheet();dismissInboxItem(di.dataset.clarifyDismiss);return;}});
 document.addEventListener("input",e=>{
   if(
@@ -2641,3 +2652,9 @@ document.addEventListener("visibilitychange",()=>{
     loadLiveCommitmentsData(false).catch(()=>null);
   }
 });
+
+
+// v1.8.5 bounded pending-state clock: updates wording without generating server traffic.
+setInterval(()=>{
+  if(currentRoute()==="tasks" && (liveTasksData?.tasks||[]).some(t=>t.pending)) render("tasks",true);
+},5000);
