@@ -1366,3 +1366,30 @@ body.opsym-modal-open{
 .opsym-confirm-actions button{
   min-height:48px;
 }
+
+/* =========================================================
+   Op-Sym v1.8.3 - Instant Interaction & Reliability
+   ========================================================= */
+.opsym-confirm-actions.single{grid-template-columns:1fr}
+.opsym-prompt-input{
+  width:100%;box-sizing:border-box;margin-top:14px;padding:13px 14px;border-radius:13px;
+  border:1px solid #D7E2F0;background:#F9FBFE;color:#0B1A3C;font:inherit;outline:none
+}
+.opsym-prompt-input:focus{border-color:#0F52FF;box-shadow:0 0 0 3px rgba(15,82,255,.10);background:#fff}
+.opsym-operation-status{
+  position:fixed;left:50%;bottom:86px;z-index:13000;transform:translate(-50%,18px);
+  max-width:min(88vw,430px);display:flex;align-items:center;gap:10px;padding:11px 15px;
+  border-radius:999px;background:#0B1A3C;color:#fff;box-shadow:0 16px 42px rgba(11,26,60,.28);
+  font-size:13px;font-weight:750;line-height:1.25;opacity:0;pointer-events:none;
+  transition:opacity .16s ease,transform .16s ease
+}
+.opsym-operation-status.show{opacity:1;transform:translate(-50%,0)}
+.opsym-operation-spinner{
+  width:15px;height:15px;display:inline-block;flex:0 0 auto;border-radius:50%;
+  border:2px solid currentColor;border-right-color:transparent;animation:opsymSpin .8s linear infinite
+}
+@keyframes opsymSpin{to{transform:rotate(360deg)}}
+.inbox-row.is-pending{opacity:.84;border-style:dashed}
+.pending-inline{display:flex;align-items:center;gap:8px;margin-top:12px;color:#64748B;font-size:12px;font-weight:750}
+.pending-inline .opsym-operation-spinner{color:#0F52FF}
+@media(max-width:520px){.opsym-operation-status{bottom:78px;font-size:12px;padding:10px 13px}}

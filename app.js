@@ -47,8 +47,8 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.8.2.1 - FAST CAPTURE + PROMOTION ENGINE
-   UI remains frozen. No write actions are enabled.
+   Mobile Backend Integration v1.8.3 - INSTANT INTERACTION + RELIABILITY
+   Approved visual UI retained. Write interactions use non-blocking acknowledgement states.
 -------------------------------------------------------- */
 let liveHomeData = null;
 let liveHomeLoaded = false;
@@ -79,6 +79,8 @@ let liveInboxLoaded=false, liveInboxLoading=false, liveInboxData=null, liveInbox
 let liveCommitmentsLoaded=false, liveCommitmentsLoading=false, liveCommitmentsData=null, liveCommitmentsError=null;
 let inboxCaptureInFlight=false, commitmentActionInFlight=false;
 let activeCommitmentFilter="ALL";
+let activeOperationToken="";
+let activeOperationTimers=[];
 let clarifyReturnFocusEl=null;
 let localInterpreterReady = true;
 
@@ -259,9 +261,7 @@ async function completeTaskById(taskId,title=""){
   if(!id || completeActionInFlight) return false;
 
   const label=String(title||id).trim();
-  const ok=confirm(
-    `Complete this task?\n\n${label}\n${id}\n\nThis will set Status to Completed and % Complete to 100%.`
-  );
+  const ok=await opsymConfirm({title:"Complete task",message:`${label}\n${id}\n\nThis will set Status to Completed and % Complete to 100%.`,confirmLabel:"Complete",cancelLabel:"Cancel"});
   if(!ok) return false;
 
   completeActionInFlight=true;
@@ -297,11 +297,7 @@ async function completeTaskById(taskId,title=""){
 
     return true;
   }catch(err){
-    alert(
-      "Could not complete task:\n"+
-      (err?.message || err)+
-      "\n\nDo not repeat the action until you have checked the task status if an acknowledgement timeout occurred."
-    );
+    await opsymNotice({title:"Completion not confirmed",message:"Could not complete task:\n"+(err?.message||err)+"\n\nCheck the task status before trying again."});
     return false;
   }finally{
     completeActionInFlight=false;
@@ -316,12 +312,12 @@ async function interpretCaptureText(){
   const textValue=box?.value.trim() || "";
 
   if(!localInterpreterReady){
-    alert("The local interpretation engine did not pass its self-test. Reload the latest Op-Sym build.");
+    await opsymNotice({title:"Interpretation unavailable",message:"The local interpretation engine did not pass its self-test. Reload the latest Op-Sym build."});
     return false;
   }
 
   if(!textValue){
-    alert("Type or paste something for Op-Sym to interpret.");
+    await opsymNotice({title:"Nothing to interpret",message:"Type or paste something for Op-Sym to interpret."});
     box?.focus();
     return false;
   }
@@ -332,7 +328,7 @@ async function interpretCaptureText(){
     showCaptureReviewSheet(interpretedCaptureDraft);
     return true;
   }catch(err){
-    alert("Could not interpret capture:\n"+(err?.message || err));
+    await opsymNotice({title:"Interpretation failed",message:"Could not interpret capture:\n"+(err?.message||err)});
     return false;
   }finally{
     captureInterpretInFlight=false;
@@ -914,22 +910,32 @@ async function waitForMutationStatus(requestId,{timeoutMs=45000}={}){
   throw new Error(`Write acknowledgement timed out.${lastError?` ${lastError.message||lastError}`:""}`);
 }
 
-async function submitMutationAndWait(action,fields){
+async function submitMutationAndWait(action,fields,options={}){
   if(!mobileBridge.endpoint) throw new Error("Mobile Bridge is not configured.");
-  const requestId=createClientRequestId().replace(/^create-/,"mutation-");
+  const requestId=String(options.requestId||createClientRequestId().replace(/^create-/,"mutation-")).trim();
   const params={action,requestId,...fields};
   if(mobileBridge.key) params.key=mobileBridge.key;
 
   try{
-    const ack=await submitBridgePostWithAck(params,12000);
+    const ack=await submitBridgePostWithAck(params,8000);
     if(ack?.ok===false) throw new Error(ack.error||"Write failed.");
     if(ack?.ok===true&&ack.data) return {...ack.data,requestId,directAck:true};
   }catch(e){
     if(!/acknowledgement not received/i.test(String(e?.message||e))) throw e;
   }
 
-  const result=await waitForMutationStatus(requestId,{timeoutMs:45000});
-  return {...result,requestId,directAck:false};
+  try{
+    const result=await waitForMutationStatus(requestId,{timeoutMs:Number(options.timeoutMs||70000)});
+    return {...result,requestId,directAck:false};
+  }catch(waitErr){
+    // One final reconciliation check prevents a successful write from being reported as a failure
+    // merely because the acknowledgement/polling path was slow.
+    try{
+      const finalStatus=await checkMutationStatus(requestId,10000);
+      if(finalStatus&&finalStatus.status&&finalStatus.status!=="not_found") return {...finalStatus,requestId,directAck:false,reconciled:true};
+    }catch(_){}
+    throw waitErr;
+  }
 }
 
 async function testWriteGateway(){
@@ -984,7 +990,7 @@ async function checkCreateRequestStatus(requestId,timeoutMs=8000){
 }
 
 async function finishSuccessfulTaskCreation(result){
-  toast(`Created ${result.taskId||"task"}`);
+  toast(result.timings?.totalMs?`Created ${result.taskId||"task"} in ${(result.timings.totalMs/1000).toFixed(1)}s`:`Created ${result.taskId||"task"}`);
   const destination=captureEntryMode==="today"?"today":"tasks";
   const sourceInboxId=interpretedCaptureDraft?.sourceInboxId||"";
 
@@ -997,7 +1003,6 @@ async function finishSuccessfulTaskCreation(result){
   interpretedCaptureDraft=null;
   render(destination,true);
 
-  liveTasksLoaded=false;
   loadLiveTasksData(true).then(()=>{if(currentRoute()==="tasks")render("tasks",true);}).catch(()=>null);
 
   liveTodayLoaded=false;
@@ -1048,158 +1053,153 @@ function opsymConfirm({title="Confirm",message="",confirmLabel="Continue",cancel
   });
 }
 
+function opsymNotice({title="Op-Sym",message="",buttonLabel="OK"}={}){
+  return new Promise(resolve=>{
+    document.getElementById("opsymNoticeBackdrop")?.remove();
+    const wrap=document.createElement("div");
+    wrap.id="opsymNoticeBackdrop";
+    wrap.className="opsym-confirm-backdrop";
+    wrap.innerHTML=`<section class="opsym-confirm-card" role="dialog" aria-modal="true" aria-labelledby="opsymNoticeTitle"><div class="opsym-confirm-mark">✓</div><h3 id="opsymNoticeTitle">${escapeHtml(title)}</h3><div class="opsym-confirm-message">${escapeHtml(message).replace(/\n/g,"<br>")}</div><div class="opsym-confirm-actions single"><button type="button" class="primary-btn" data-notice-ok>${escapeHtml(buttonLabel)}</button></div></section>`;
+    const finish=()=>{wrap.remove();resolve(true);};
+    wrap.querySelector("[data-notice-ok]")?.addEventListener("click",finish);
+    wrap.addEventListener("click",e=>{if(e.target===wrap)finish();});
+    document.body.appendChild(wrap);
+    requestAnimationFrame(()=>wrap.querySelector("[data-notice-ok]")?.focus({preventScroll:true}));
+  });
+}
+
+function opsymPrompt({title="Enter value",message="",value="",placeholder="",confirmLabel="Continue",cancelLabel="Cancel"}={}){
+  return new Promise(resolve=>{
+    document.getElementById("opsymPromptBackdrop")?.remove();
+    const wrap=document.createElement("div");
+    wrap.id="opsymPromptBackdrop";
+    wrap.className="opsym-confirm-backdrop";
+    wrap.innerHTML=`<section class="opsym-confirm-card" role="dialog" aria-modal="true" aria-labelledby="opsymPromptTitle"><h3 id="opsymPromptTitle">${escapeHtml(title)}</h3><div class="opsym-confirm-message">${escapeHtml(message).replace(/\n/g,"<br>")}</div><input class="opsym-prompt-input" data-prompt-input value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}"><div class="opsym-confirm-actions"><button type="button" class="ghost-btn" data-prompt-cancel>${escapeHtml(cancelLabel)}</button><button type="button" class="primary-btn" data-prompt-ok>${escapeHtml(confirmLabel)}</button></div></section>`;
+    const input=wrap.querySelector("[data-prompt-input]");
+    const finish=v=>{wrap.remove();resolve(v);};
+    wrap.querySelector("[data-prompt-cancel]")?.addEventListener("click",()=>finish(null));
+    wrap.querySelector("[data-prompt-ok]")?.addEventListener("click",()=>finish(input?.value??""));
+    input?.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();finish(input?.value??"");}if(e.key==="Escape"){e.preventDefault();finish(null);}});
+    wrap.addEventListener("click",e=>{if(e.target===wrap)finish(null);});
+    document.body.appendChild(wrap);
+    requestAnimationFrame(()=>{input?.focus({preventScroll:true});input?.select();});
+  });
+}
+
+function ensureOperationStatus(){
+  let el=document.getElementById("opsymOperationStatus");
+  if(el)return el;
+  el=document.createElement("div");el.id="opsymOperationStatus";el.className="opsym-operation-status";el.setAttribute("role","status");el.setAttribute("aria-live","polite");
+  el.innerHTML='<span class="opsym-operation-spinner" aria-hidden="true"></span><span data-operation-text></span>';
+  document.body.appendChild(el);return el;
+}
+function beginOperation(label,{stillAfter=3500,longAfter=9000}={}){
+  activeOperationTimers.forEach(clearTimeout);activeOperationTimers=[];
+  const token="op-"+Date.now()+"-"+Math.random().toString(36).slice(2);activeOperationToken=token;const el=ensureOperationStatus();
+  const set=msg=>{if(activeOperationToken!==token)return;const t=el.querySelector("[data-operation-text]");if(t)t.textContent=msg;el.classList.add("show");};
+  set(label);activeOperationTimers.push(setTimeout(()=>set("Still working… your request is safe."),stillAfter));activeOperationTimers.push(setTimeout(()=>set("Taking longer than usual… Op-Sym is still confirming the result."),longAfter));return token;
+}
+function updateOperation(token,message){if(!token||activeOperationToken!==token)return;const el=ensureOperationStatus();const t=el.querySelector("[data-operation-text]");if(t)t.textContent=message;el.classList.add("show");}
+function endOperation(token,message=""){if(token&&activeOperationToken!==token)return;activeOperationTimers.forEach(clearTimeout);activeOperationTimers=[];const el=ensureOperationStatus();if(message){const t=el.querySelector("[data-operation-text]");if(t)t.textContent=message;setTimeout(()=>el.classList.remove("show"),1000);}else el.classList.remove("show");activeOperationToken="";}
+function recordOpsymPerf(eventName,data={}){
+  try{
+    const record={event:eventName,at:new Date().toISOString(),...data};
+    console.info("[Op-Sym v1.8.3 perf]",record);
+    const key="opsym_perf_v183";
+    const current=JSON.parse(localStorage.getItem(key)||"[]");
+    current.push(record);
+    localStorage.setItem(key,JSON.stringify(current.slice(-30)));
+  }catch(_){}
+}
+function removePendingInbox(requestId){if(!liveInboxData?.items)return;liveInboxData.items=liveInboxData.items.filter(x=>x.pendingRequestId!==requestId);}
+function removePendingTask(requestId){if(!liveTasksData?.tasks)return;const before=liveTasksData.tasks.length;liveTasksData.tasks=liveTasksData.tasks.filter(x=>x.pendingRequestId!==requestId);if(liveTasksData.summary&&liveTasksData.tasks.length<before)liveTasksData.summary.open=Math.max(0,Number(liveTasksData.summary.open||0)-1);}
+
 async function captureToInbox(text){
+  const clientT0=performance.now();
   if(inboxCaptureInFlight) return false;
 
   text=String(text||"").trim();
   if(!text){
-    alert("Enter something to capture.");
+    await opsymNotice({title:"Nothing to capture",message:"Type or paste something first."});
+    document.getElementById("inboxCaptureText")?.focus();
     return false;
   }
 
   const d=buildInboxDraft(text);
-  const norm=v=>String(v||"").toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu," ")
-    .replace(/\s+/g," ")
-    .trim();
-
-  const sim=(x,y)=>{
-    const A=new Set(norm(x).split(" ").filter(Boolean));
-    const B=new Set(norm(y).split(" ").filter(Boolean));
-    if(!A.size||!B.size) return 0;
-    let n=0;
-    A.forEach(t=>{if(B.has(t))n++;});
-    return n/new Set([...A,...B]).size;
-  };
+  const norm=v=>String(v||"").toLowerCase().replace(/[^\p{L}\p{N}]+/gu," ").replace(/\s+/g," ").trim();
+  const sim=(x,y)=>{const A=new Set(norm(x).split(" ").filter(Boolean));const B=new Set(norm(y).split(" ").filter(Boolean));if(!A.size||!B.size)return 0;let n=0;A.forEach(t=>{if(B.has(t))n++;});return n/new Set([...A,...B]).size;};
 
   let dup=null,score=0;
-  for(const x of(liveInboxData?.items||[])){
-    const q=sim(text,x.rawText||"");
-    if(q>score){score=q;dup=x;}
-  }
-
+  for(const x of(liveInboxData?.items||[])){const q=sim(text,x.rawText||"");if(q>score){score=q;dup=x;}}
   if(score>=.72){
-    const keep=await opsymConfirm({
-      title:"Possible duplicate",
-      message:`This looks ${norm(dup.rawText)===norm(text)?"the same as":"very similar to"} ${dup.inboxId}.\n\nCreate another separate Inbox item?`,
-      confirmLabel:"Capture anyway",
-      cancelLabel:"Keep existing"
-    });
-
-    if(!keep){
-      render("inbox",true);
-      return false;
-    }
+    const keep=await opsymConfirm({title:"Possible duplicate",message:`This looks ${norm(dup.rawText)===norm(text)?"the same as":"very similar to"} ${dup.inboxId}.\n\nCreate another separate Inbox item?`,confirmLabel:"Capture anyway",cancelLabel:"Keep existing"});
+    if(!keep){render("inbox",true);return false;}
   }
 
-  const approved=await opsymConfirm({
-    title:"Capture to Inbox",
-    message:`${d.title}\n\nType: ${d.commitmentType}\nDirection: ${d.direction}\nPerson: ${d.personName||"Not resolved"}\nDate: ${d.date||"Not resolved"}\nTime: ${d.time||"Not resolved"}`,
-    confirmLabel:"Capture",
-    cancelLabel:"Cancel"
+  // v1.8.3: Capture is deliberately frictionless. The Capture button itself is the user's intent.
+  // Show the object immediately while the server write is being confirmed.
+  const requestId=createClientRequestId().replace(/^create-/,"mutation-");
+  liveInboxData=liveInboxData||{summary:{open:0,total:0},items:[]};
+  liveInboxData.items=liveInboxData.items||[];
+  liveInboxData.items.unshift({
+    inboxId:"Saving…",pending:true,pendingRequestId:requestId,captured:new Date().toISOString(),source:"CAPTURING",
+    rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,
+    confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",status:"Pending"
   });
-
-  if(!approved) return false;
-
+  liveInboxData.summary=liveInboxData.summary||{};
+  liveInboxData.summary.open=Number(liveInboxData.summary.open||0)+1;
+  liveInboxData.summary.total=Number(liveInboxData.summary.total||0)+1;
   inboxCaptureInFlight=true;
+  render("inbox",true);
+  const op=beginOperation("Capturing to Inbox…");
 
   try{
     let r=await submitMutationAndWait("capture-inbox",{
-      rawText:text,
-      title:d.title,
-      intent:d.intent,
-      commitmentType:d.commitmentType,
-      direction:d.direction,
-      confidence:String(d.combinedConfidence),
-      personName:d.personName||"",
-      locationName:d.location||"",
-      date:d.date||"",
-      time:d.time||"",
-      plannedHours:d.plannedHours||"",
-      parserVersion:"semantic-local-v2.0+commitment-local-v1.1",
-      forceDuplicate:String(score>=.72),
-      source:"mobile_inbox_capture"
-    });
+      rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,
+      confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",
+      parserVersion:"semantic-local-v2.0+commitment-local-v1.1",forceDuplicate:String(score>=.72),source:"mobile_inbox_capture"
+    },{requestId,timeoutMs:70000});
 
     if(r.status==="duplicate"){
-      const again=await opsymConfirm({
-        title:"Matching Inbox item exists",
-        message:`${r.existing?.inboxId||"An existing item"} already contains this capture.\n\nCreate another separate copy?`,
-        confirmLabel:"Capture another",
-        cancelLabel:"Keep existing"
-      });
+      removePendingInbox(requestId);
+      if(liveInboxData.summary){liveInboxData.summary.open=Math.max(0,Number(liveInboxData.summary.open||0)-1);liveInboxData.summary.total=Math.max(0,Number(liveInboxData.summary.total||0)-1);}
+      render("inbox",true);
+      endOperation(op,"Matching item found");
+      const again=await opsymConfirm({title:"Matching Inbox item exists",message:`${r.existing?.inboxId||"An existing item"} already contains this capture.\n\nCreate another separate copy?`,confirmLabel:"Capture another",cancelLabel:"Keep existing"});
+      if(!again)return false;
 
-      if(!again){
-        render("inbox",true);
-        return false;
-      }
-
-      r=await submitMutationAndWait("capture-inbox",{
-        rawText:text,
-        title:d.title,
-        intent:d.intent,
-        commitmentType:d.commitmentType,
-        direction:d.direction,
-        confidence:String(d.combinedConfidence),
-        personName:d.personName||"",
-        locationName:d.location||"",
-        date:d.date||"",
-        time:d.time||"",
-        plannedHours:d.plannedHours||"",
-        parserVersion:"semantic-local-v2.0+commitment-local-v1.1",
-        forceDuplicate:"true",
-        source:"mobile_inbox_capture"
-      });
+      const requestId2=createClientRequestId().replace(/^create-/,"mutation-");
+      liveInboxData.items.unshift({inboxId:"Saving…",pending:true,pendingRequestId:requestId2,captured:new Date().toISOString(),source:"CAPTURING",rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",status:"Pending"});
+      liveInboxData.summary.open=Number(liveInboxData.summary.open||0)+1;liveInboxData.summary.total=Number(liveInboxData.summary.total||0)+1;
+      render("inbox",true);
+      const op2=beginOperation("Capturing separate Inbox item…");
+      try{
+        r=await submitMutationAndWait("capture-inbox",{rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",parserVersion:"semantic-local-v2.0+commitment-local-v1.1",forceDuplicate:"true",source:"mobile_inbox_capture"},{requestId:requestId2,timeoutMs:70000});
+        removePendingInbox(requestId2);
+        endOperation(op2,"Captured");
+      }catch(e){removePendingInbox(requestId2);if(liveInboxData.summary){liveInboxData.summary.open=Math.max(0,Number(liveInboxData.summary.open||0)-1);liveInboxData.summary.total=Math.max(0,Number(liveInboxData.summary.total||0)-1);}render("inbox",true);endOperation(op2);throw e;}
+    }else{
+      removePendingInbox(requestId);
+      endOperation(op,"Captured");
     }
 
-    if(r.status!=="captured"){
-      throw new Error(r.error||r.message||"Inbox capture was not confirmed.");
-    }
+    if(r.status!=="captured")throw new Error(r.error||r.message||"Inbox capture was not confirmed.");
 
-    liveInboxData=liveInboxData||{summary:{open:0,total:0},items:[]};
-    liveInboxData.items=liveInboxData.items||[];
-
-    liveInboxData.items.unshift({
-      inboxId:r.inboxId,
-      objectUuid:r.objectUuid||"",
-      captured:new Date().toISOString(),
-      source:"mobile_inbox_capture",
-      rawText:text,
-      title:r.title||d.title,
-      intent:r.intent||d.intent,
-      commitmentType:r.commitmentType||d.commitmentType,
-      direction:r.direction||d.direction,
-      confidence:r.confidence||String(d.combinedConfidence),
-      personName:r.personName||d.personName||"",
-      personUuid:r.personUuid||"",
-      locationName:r.locationName||d.location||"",
-      locationUuid:r.locationUuid||"",
-      date:r.date||d.date||"",
-      time:r.time||d.time||"",
-      plannedHours:r.plannedHours||d.plannedHours||"",
-      status:"Open"
-    });
-
-    liveInboxData.summary=liveInboxData.summary||{};
-    liveInboxData.summary.open=Number(liveInboxData.summary.open||0)+1;
-    liveInboxData.summary.total=Number(liveInboxData.summary.total||0)+1;
-
-    toast(
-      r.timings?.totalMs
-        ? `Captured ${r.inboxId} in ${(r.timings.totalMs/1000).toFixed(1)}s`
-        : `Captured ${r.inboxId}`
-    );
-
+    liveInboxData.items.unshift({inboxId:r.inboxId,objectUuid:r.objectUuid||"",captured:new Date().toISOString(),source:"mobile_inbox_capture",rawText:text,title:r.title||d.title,intent:r.intent||d.intent,commitmentType:r.commitmentType||d.commitmentType,direction:r.direction||d.direction,confidence:r.confidence||String(d.combinedConfidence),personName:r.personName||d.personName||"",personUuid:r.personUuid||"",locationName:r.locationName||d.location||"",locationUuid:r.locationUuid||"",date:r.date||d.date||"",time:r.time||d.time||"",plannedHours:r.plannedHours||d.plannedHours||"",status:"Open"});
+    toast(r.timings?.totalMs?`Captured ${r.inboxId} in ${(r.timings.totalMs/1000).toFixed(1)}s`:`Captured ${r.inboxId}`);
     render("inbox",true);
+    recordOpsymPerf("capture-inbox",{clientMs:Math.round(performance.now()-clientT0),server:r.timings||null,directAck:!!r.directAck,reconciled:!!r.reconciled});
 
     liveInboxLoaded=false;
-    loadLiveInboxData(true)
-      .then(()=>{if(currentRoute()==="inbox")render("inbox",true);})
-      .catch(()=>null);
-
+    loadLiveInboxData(true).then(()=>{if(currentRoute()==="inbox")render("inbox",true);}).catch(()=>null);
     return true;
   }catch(err){
-    alert("Could not capture to Inbox:\n"+(err?.message||err));
+    const hadPending=!!liveInboxData?.items?.some(x=>x.pendingRequestId===requestId);
+    removePendingInbox(requestId);
+    if(hadPending&&liveInboxData?.summary){liveInboxData.summary.open=Math.max(0,Number(liveInboxData.summary.open||0)-1);liveInboxData.summary.total=Math.max(0,Number(liveInboxData.summary.total||0)-1);}
+    render("inbox",true);
+    endOperation(op);
+    await opsymNotice({title:"Capture not confirmed",message:`Op-Sym could not confirm this write.\n\n${err?.message||err}\n\nDo not capture it again until you have checked the Inbox; the server may still have completed the write.`});
     return false;
   }finally{
     inboxCaptureInFlight=false;
@@ -1417,12 +1417,15 @@ async function clarifyToTask(id){
 
   closeInboxClarifySheet();
   captureEntryMode="interpreted";
+  const actionableTitle=d.commitmentType==="WAIT"
+    ? (d.personName ? `Follow up with ${d.personName}` : `Follow up: ${d.title}`)
+    : d.title;
   interpretedCaptureDraft={
-    sourceText:d.rawText,title:d.title,role:"",project:"",priority:"Medium",
-    plannedHours:d.plannedHours,date:d.date,time:d.time,location:d.locationName,
+    sourceText:d.rawText,title:actionableTitle,role:"",project:"",priority:"Medium",
+    plannedHours:d.commitmentType==="WAIT"?"":d.plannedHours,date:d.date,time:d.time,location:d.locationName,
     personName:d.personName,intent:d.intent,commitmentType:d.commitmentType,
-    direction:d.direction,description:d.rawText,confidence:.99,
-    parserVersion:"clarified-v1.8.2",
+    direction:d.direction,description:d.commitmentType==="WAIT"?`Waiting-for source: ${d.rawText}`:d.rawText,confidence:.99,
+    parserVersion:"clarified-v1.8.3",
     sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid
   };
   render("capture",true);
@@ -1430,21 +1433,17 @@ async function clarifyToTask(id){
 }
 
 async function clarifyToCommitment(id){
+  const clientT0=performance.now();
   if(commitmentActionInFlight) return false;
   const d=collectClarify(id);
   if(!d) return false;
 
-  const approved=await opsymConfirm({
-    title:"Create Commitment",
-    message:`${d.title}\n\nType: ${d.commitmentType}\nDirection: ${d.direction}\nPerson: ${d.personName||"Not stated"}`,
-    confirmLabel:"Create Commitment",
-    cancelLabel:"Cancel"
-  });
-  if(!approved) return false;
-
+  // The clarification sheet is already the deliberate review step.
+  // v1.8.3 removes the redundant second confirmation.
   commitmentActionInFlight=true;
   const btn=document.querySelector(`[data-clarify-commitment="${CSS.escape(String(id))}"]`);
   if(btn){btn.disabled=true;btn.textContent="Creating…";}
+  const op=beginOperation("Creating commitment…");
 
   try{
     const r=await submitMutationAndWait("promote-inbox-commitment",{
@@ -1452,40 +1451,32 @@ async function clarifyToCommitment(id){
       commitmentType:d.commitmentType,direction:d.direction,personName:d.personName,
       locationName:d.locationName,date:d.date,time:d.time,
       plannedHours:d.plannedHours,intent:d.intent,confidence:"1.0"
-    });
+    },{timeoutMs:70000});
 
     if(r.status!=="promoted_commitment") throw new Error(r.error||r.message||"Commitment promotion failed.");
 
     closeInboxClarifySheet();
-
     if(liveInboxData?.items){
       liveInboxData.items=liveInboxData.items.filter(x=>x.inboxId!==d.inboxId);
       if(liveInboxData.summary) liveInboxData.summary.open=Math.max(0,Number(liveInboxData.summary.open||0)-1);
     }
+    liveCommitmentsData=liveCommitmentsData||{summary:{open:0,waiting:0,closure:0,overdue:0},items:[]};
+    liveCommitmentsData.items=liveCommitmentsData.items||[];
+    liveCommitmentsData.items.unshift({commitmentId:r.commitmentId,objectUuid:r.objectUuid||"",title:r.title||d.title,type:r.commitmentType||d.commitmentType,direction:r.direction||d.direction,personName:r.personName||d.personName,dueDate:r.dueDate||d.date,status:"Open"});
+    if(liveCommitmentsData.summary) liveCommitmentsData.summary.open=Number(liveCommitmentsData.summary.open||0)+1;
 
-    if(liveCommitmentsData){
-      liveCommitmentsData.items=liveCommitmentsData.items||[];
-      liveCommitmentsData.items.unshift({
-        commitmentId:r.commitmentId,objectUuid:r.objectUuid||"",title:r.title||d.title,
-        type:r.commitmentType||d.commitmentType,direction:r.direction||d.direction,
-        personName:r.personName||d.personName,dueDate:r.dueDate||d.date,status:"Open"
-      });
-    }
-
-    toast(
-      r.timings?.totalMs
-        ? `Created ${r.commitmentId||"commitment"} in ${(r.timings.totalMs/1000).toFixed(1)}s`
-        : `Created ${r.commitmentId||"commitment"}`
-    );
+    endOperation(op,"Commitment created");
+    recordOpsymPerf("promote-inbox-commitment",{clientMs:Math.round(performance.now()-clientT0),server:r.timings||null,directAck:!!r.directAck,reconciled:!!r.reconciled});
+    toast(r.timings?.totalMs?`Created ${r.commitmentId||"commitment"} in ${(r.timings.totalMs/1000).toFixed(1)}s`:`Created ${r.commitmentId||"commitment"}`);
     render("commitments",true);
 
-    liveInboxLoaded=false;
-    liveCommitmentsLoaded=false;
+    liveInboxLoaded=false;liveCommitmentsLoaded=false;
     loadLiveInboxData(true).catch(()=>null);
     loadLiveCommitmentsData(true).then(()=>{if(currentRoute()==="commitments")render("commitments",true);}).catch(()=>null);
     return true;
   }catch(e){
-    alert(e.message||e);
+    endOperation(op);
+    await opsymNotice({title:"Commitment not confirmed",message:String(e?.message||e)});
     return false;
   }finally{
     commitmentActionInFlight=false;
@@ -1494,6 +1485,7 @@ async function clarifyToCommitment(id){
 }
 
 async function createTaskFromForm(){
+  const clientT0=performance.now();
   if(createTaskInFlight) return false;
 
   const title=document.getElementById("newTaskTitle")?.value.trim() || "";
@@ -1507,41 +1499,27 @@ async function createTaskFromForm(){
   const description=document.getElementById("newTaskDescription")?.value.trim() || "";
 
   if(!title){
-    alert("Enter a task title.");
+    await opsymNotice({title:"Task title required",message:"Enter a task title before creating the task."});
     document.getElementById("newTaskTitle")?.focus();
     return false;
   }
-
   if(time && !date){
-    alert("Choose a scheduled date when entering a start time.");
+    await opsymNotice({title:"Date required",message:"Choose a scheduled date when entering a start time."});
     return false;
   }
 
-  const scheduleText=date
-    ? `${date}${time?` at ${time}`:" (any time)"}`
-    : "Unscheduled";
-
-  const confirmed=confirm(
-    `Create this task?\n\n${title}\n\n`+
-    `Priority: ${priority}\n`+
-    `Schedule: ${scheduleText}`
-  );
-  if(!confirmed) return false;
-
+  const semanticDraft=(captureEntryMode==="interpreted" && interpretedCaptureDraft) ? interpretedCaptureDraft : null;
+  const fromInbox=!!semanticDraft?.sourceInboxId;
   const requestId=createClientRequestId();
+  const btn=document.querySelector('#newTaskForm button[type="submit"]');
+  if(btn){btn.disabled=true;btn.dataset.originalText=btn.textContent;btn.textContent="Creating…";}
   createTaskInFlight=true;
+  const op=beginOperation("Creating task…");
 
   try{
-    const semanticDraft=(captureEntryMode==="interpreted" && interpretedCaptureDraft)
-      ? interpretedCaptureDraft
-      : null;
-
-    const fromInbox=!!semanticDraft?.sourceInboxId;
     const params={
       action:fromInbox?"promote-inbox-task":"create-task",
-      requestId,
-      title,role,project,priority,
-      plannedHours,date,time,location,description,
+      requestId,title,role,project,priority,plannedHours,date,time,location,description,
       captureSource: semanticDraft ? "natural_language" : (captureEntryMode==="today" ? "add_to_today" : "manual"),
       rawCaptureText: semanticDraft?.sourceText || "",
       parserVersion: semanticDraft?.parserVersion || "",
@@ -1561,57 +1539,65 @@ async function createTaskFromForm(){
     if(mobileBridge.key) params.key=mobileBridge.key;
 
     let result;
-    try{
-      if(fromInbox){
-        const fields={...params};
-        delete fields.action;
-        delete fields.requestId;
-        result=await submitMutationAndWait("promote-inbox-task",fields);
-      }else{
-        try{
-          const ack=await submitBridgePostWithAck(params,12000);
-          if(ack?.ok===false) throw new Error(ack.error||"Task creation failed.");
-          if(ack?.ok===true&&ack.data) result=ack.data;
-        }catch(ackErr){
-          if(!/acknowledgement not received/i.test(String(ackErr?.message||ackErr))) throw ackErr;
-          result=await waitForCreateRequestStatus(requestId,{timeoutMs:45000});
+    if(fromInbox){
+      const fields={...params};delete fields.action;delete fields.requestId;
+      result=await submitMutationAndWait("promote-inbox-task",fields,{requestId:requestId.replace(/^create-/,"mutation-"),timeoutMs:70000});
+    }else{
+      try{
+        const ack=await submitBridgePostWithAck(params,8000);
+        if(ack?.ok===false) throw new Error(ack.error||"Task creation failed.");
+        if(ack?.ok===true&&ack.data) result=ack.data;
+      }catch(ackErr){
+        if(!/acknowledgement not received/i.test(String(ackErr?.message||ackErr))) throw ackErr;
+        updateOperation(op,"Write received. Confirming task…");
+        try{result=await waitForCreateRequestStatus(requestId,{timeoutMs:70000});}
+        catch(waitErr){
+          try{result=await checkCreateRequestStatus(requestId,10000);}catch(_){throw waitErr;}
         }
       }
-    }catch(err){
-      alert(
-        "Task creation could not be confirmed.\n\n"+
-        "Do not press Create again yet.\n"+
-        "Request ID: "+requestId+"\n\n"+
-        (err?.message || err)
-      );
-      return false;
     }
 
-    if(result.status==="error"){
-      throw new Error(result.error || result.message || "Task creation failed.");
-    }
-
+    if(result.status==="error") throw new Error(result.error || result.message || "Task creation failed.");
     if(result.blocked){
-      alert(
-        "This time conflicts with existing work.\n\n"+
-        formatConflictList(result.conflicts)+
-        "\n\nChoose another time before creating the task."
-      );
+      endOperation(op);
+      await opsymNotice({title:"Schedule conflict",message:`This time conflicts with existing work.
+
+${formatConflictList(result.conflicts)}
+
+Choose another time before creating the task.`});
       return false;
     }
+    if(!(result.created || result.status==="promoted_task")) throw new Error(result.message || "The task was not verified as created.");
 
-    if(!(result.created || result.status==="promoted_task")){
-      throw new Error(result.message || "The task was not verified as created.");
+    // Add the confirmed task locally before any background refresh.
+    liveTasksData=liveTasksData||{summary:{open:0,today:0,unscheduled:0,clashes:0},tasks:[]};
+    liveTasksData.tasks=liveTasksData.tasks||[];
+    if(!liveTasksData.tasks.some(x=>x.taskId===result.taskId)){
+      const isToday=!!date && date===new Date().toISOString().slice(0,10);
+      liveTasksData.tasks.unshift({taskId:result.taskId,title:result.title||title,status:date?"Scheduled":"Open",priority,role,project,location,scheduledDate:date,startTime:time,isToday,isUnscheduled:!date,hasClash:false,meta:[role,priority?priority+" priority":"",date?(isToday?"Today":date):"Unscheduled"].filter(Boolean).join(" · ")});
+      liveTasksData.summary.open=Number(liveTasksData.summary.open||0)+1;
+      if(isToday) liveTasksData.summary.today=Number(liveTasksData.summary.today||0)+1;
+      if(!date) liveTasksData.summary.unscheduled=Number(liveTasksData.summary.unscheduled||0)+1;
+      liveTasksLoaded=true;
     }
 
+    endOperation(op,"Task created");
+    recordOpsymPerf(fromInbox?"promote-inbox-task":"create-task",{clientMs:Math.round(performance.now()-clientT0),server:result.timings||null,directAck:!!result.directAck,reconciled:!!result.reconciled});
     await finishSuccessfulTaskCreation(result);
     return true;
-
   }catch(err){
-    alert("Could not create task:\n"+(err?.message || err));
+    endOperation(op);
+    await opsymNotice({title:"Task not confirmed",message:`Op-Sym could not confirm task creation.
+
+Request ID: ${requestId}
+
+${err?.message||err}
+
+Check Tasks before pressing Create again.`});
     return false;
   }finally{
     createTaskInFlight=false;
+    if(btn){btn.disabled=false;btn.textContent=btn.dataset.originalText||"Create task";}
   }
 }
 
@@ -1636,24 +1622,18 @@ async function rescheduleTaskById(taskId,title="",currentDate="",currentTime="")
   const id=String(taskId||"").trim();
   if(!id || rescheduleActionInFlight) return false;
 
-  const proposedDate=prompt(
-    `Reschedule ${title||id}\n\nEnter new date as YYYY-MM-DD:`,
-    normalizeDateInput(currentDate)
-  );
+  const proposedDate=await opsymPrompt({title:"Reschedule task",message:`${title||id}\n\nEnter new date as YYYY-MM-DD.`,value:normalizeDateInput(currentDate),placeholder:"YYYY-MM-DD",confirmLabel:"Next"});
   if(proposedDate===null) return false;
 
-  const proposedTime=prompt(
-    `Enter new start time in 24-hour format HH:MM:`,
-    normalizeTimeInput(currentTime)
-  );
+  const proposedTime=await opsymPrompt({title:"New start time",message:"Enter new start time in 24-hour format HH:MM.",value:normalizeTimeInput(currentTime),placeholder:"HH:MM",confirmLabel:"Check time"});
   if(proposedTime===null) return false;
 
   if(!/^\d{4}-\d{2}-\d{2}$/.test(proposedDate.trim())){
-    alert("Date must use YYYY-MM-DD.");
+    await opsymNotice({title:"Invalid date",message:"Date must use YYYY-MM-DD."});
     return false;
   }
   if(!/^\d{2}:\d{2}$/.test(proposedTime.trim())){
-    alert("Time must use HH:MM in 24-hour format.");
+    await opsymNotice({title:"Invalid time",message:"Time must use HH:MM in 24-hour format."});
     return false;
   }
 
@@ -1686,7 +1666,7 @@ async function rescheduleTaskById(taskId,title="",currentDate="",currentTime="")
 
     return await confirmAndWriteReschedule(id,title||id,preview);
   }catch(err){
-    alert("Could not reschedule task:\n"+(err?.message || err));
+    await opsymNotice({title:"Reschedule failed",message:"Could not reschedule task:\n"+(err?.message||err)});
     return false;
   }finally{
     rescheduleActionInFlight=false;
@@ -1704,12 +1684,7 @@ async function fetchSmartRescheduleSuggestions(taskId,date){
 }
 
 async function confirmAndWriteReschedule(taskId,title,preview){
-  const confirmed=confirm(
-    `Reschedule this task?\n\n${title}\n${taskId}\n\n`+
-    `New slot: ${preview.date} at ${preview.time}\n`+
-    `Estimated end: ${preview.endTime}\n\n`+
-    `No direct task overlap was found.`
-  );
+  const confirmed=await opsymConfirm({title:"Reschedule task",message:`${title}\n${taskId}\n\nNew slot: ${preview.date} at ${preview.time}\nEstimated end: ${preview.endTime}\n\nNo direct task overlap was found.`,confirmLabel:"Reschedule",cancelLabel:"Cancel"});
   if(!confirmed) return false;
 
   const result=await submitMutationAndWait("reschedule-task",{
@@ -1834,7 +1809,7 @@ function showSmartRescheduleSheet({taskId,title,conflictPreview,suggestions}){
     try{
       await confirmAndWriteReschedule(taskId,title,preview);
     }catch(err){
-      alert("Could not reschedule task:\n"+(err?.message||err));
+      await opsymNotice({title:"Reschedule failed",message:"Could not reschedule task:\n"+(err?.message||err)});
     }finally{
       rescheduleActionInFlight=false;
     }
@@ -1943,16 +1918,13 @@ function runBackendSetupFromQuery(){
   if(p.get("resetapi")==="1"){
     clearMobileBridgeConfig();
     history.replaceState({},"",location.pathname+location.hash);
-    setTimeout(()=>alert("Op-Sym Mobile Bridge settings were removed from this phone."),50);
+    setTimeout(()=>opsymNotice({title:"Bridge settings removed",message:"Op-Sym Mobile Bridge settings were removed from this phone."}),50);
     return;
   }
   if(p.get("setup")!=="1") return;
 
   setTimeout(async()=>{
-    const endpoint=prompt(
-      "Op-Sym Mobile Bridge setup\n\nPaste the Apps Script Web App URL ending in /exec:",
-      mobileBridge.endpoint || ""
-    );
+    const endpoint=await opsymPrompt({title:"Op-Sym Mobile Bridge setup",message:"Paste the Apps Script Web App URL ending in /exec.",value:mobileBridge.endpoint||"",placeholder:"https://script.google.com/macros/s/.../exec",confirmLabel:"Save"});
     if(endpoint===null)return;
     try{
       saveMobileBridgeConfig(endpoint,"");
@@ -1960,11 +1932,9 @@ function runBackendSetupFromQuery(){
       const homeOk=await loadLiveHomeData(false);
       const todayOk=homeOk ? await loadLiveTodayData(false) : false;
       const tasksOk=todayOk ? await loadLiveTasksData(false) : false;
-      alert(homeOk && todayOk && tasksOk
-        ? "Connected. Home, Today and Tasks are now reading live Op-Sym data."
-        : "Settings saved, but a live-data test failed. Check the bridge deployment and version.");
+      await opsymNotice({title:homeOk&&todayOk&&tasksOk?"Connected":"Connection needs attention",message:homeOk&&todayOk&&tasksOk?"Home, Today and Tasks are now reading live Op-Sym data.":"Settings were saved, but a live-data test failed. Check the bridge deployment and version."});
     }catch(err){
-      alert("Setup was not saved:\n"+err.message);
+      await opsymNotice({title:"Setup not saved",message:"Setup was not saved:\n"+err.message});
     }
   },120);
 }
@@ -2030,7 +2000,7 @@ async function loadLiveCommitmentsData(force=false){
   if(!mobileBridge.endpoint)return false;if(liveCommitmentsLoading||(liveCommitmentsLoaded&&!force))return liveCommitmentsData;liveCommitmentsLoading=true;liveCommitmentsError=null;
   try{const p={action:'commitments'};if(mobileBridge.key)p.key=mobileBridge.key;const x=await jsonpRequest(mobileBridge.endpoint,p,12000,'Commitments data');if(!x||x.ok!==true)throw new Error(x?.error||'Could not load Commitments.');liveCommitmentsData=x.data||{summary:{open:0,waiting:0,closure:0,overdue:0},items:[]};liveCommitmentsLoaded=true;return liveCommitmentsData;}catch(err){liveCommitmentsError=err;throw err;}finally{liveCommitmentsLoading=false;}
 }
-function inboxRows(){const items=liveInboxData?.items||[];if(!items.length)return `<div class="empty-card"><strong>Inbox clear</strong></div>`;return items.map(x=>`<article class="inbox-row"><div class="inbox-topline"><span class="source">${escapeHtml(x.source||"CAPTURE")}</span><span class="commitment-pill">${escapeHtml(x.commitmentType||"DO")}</span></div><h3>${escapeHtml(x.title||x.rawText)}</h3><p>${escapeHtml(x.rawText||"")}</p><div class="meta">${escapeHtml([x.personName,x.locationName,x.date,x.time].filter(Boolean).join(" · "))}</div><div class="inbox-actions one-action"><button class="primary-btn compact inbox-clarify-btn" type="button" aria-label="Review and classify ${escapeHtml(x.inboxId)}" data-inbox-clarify="${escapeHtml(x.inboxId)}"><span>Review &amp; classify</span></button></div></article>`).join("");}
+function inboxRows(){const items=liveInboxData?.items||[];if(!items.length)return `<div class="empty-card"><strong>Inbox clear</strong></div>`;return items.map(x=>`<article class="inbox-row ${x.pending?"is-pending":""}"><div class="inbox-topline"><span class="source">${escapeHtml(x.source||"CAPTURE")}</span><span class="commitment-pill">${escapeHtml(x.commitmentType||"DO")}</span></div><h3>${escapeHtml(x.title||x.rawText)}</h3><p>${escapeHtml(x.rawText||"")}</p><div class="meta">${escapeHtml([x.personName,x.locationName,x.date,x.time].filter(Boolean).join(" · "))}</div>${x.pending?`<div class="pending-inline"><span class="opsym-operation-spinner" aria-hidden="true"></span><span>Saving securely…</span></div>`:`<div class="inbox-actions one-action"><button class="primary-btn compact inbox-clarify-btn" type="button" aria-label="Review and classify ${escapeHtml(x.inboxId)}" data-inbox-clarify="${escapeHtml(x.inboxId)}"><span>Review &amp; classify</span></button></div>`}</article>`).join("");}
 function commitmentRows(){const items=liveCommitmentsData?.items||[],filtered=activeCommitmentFilter==="ALL"?items:items.filter(x=>String(x.type||"DO").toUpperCase()===activeCommitmentFilter);if(!filtered.length)return `<div class="empty-card"><strong>No ${escapeHtml(activeCommitmentFilter==="ALL"?"open":activeCommitmentFilter)} commitments</strong></div>`;return filtered.map(x=>`<article class="commitment-card"><div class="state">${escapeHtml(x.type||"DO")}</div><h3>${escapeHtml(x.title||x.commitmentId)}</h3><p>${escapeHtml(x.direction?`Direction: ${x.direction}`:"")}</p></article>`).join("");}
 function home(){
   const [g,title,sub]=greeting();
