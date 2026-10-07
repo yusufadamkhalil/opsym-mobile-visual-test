@@ -1,0 +1,28 @@
+{
+  "name": "Op-Sym",
+  "short_name": "Op-Sym",
+  "description": "Personal operating system for capture, commitments, tasks and follow-through.",
+  "start_url": "./?v=190",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    {
+      "src": "opsym-logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "share_target": {
+    "action": "./?share_target=1&v=190",
+    "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  }
+}

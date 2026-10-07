@@ -80,6 +80,11 @@ let liveCommitmentsLoaded=false, liveCommitmentsLoading=false, liveCommitmentsDa
 let inboxCaptureInFlight=false, commitmentActionInFlight=false;
 let activeCommitmentFilter="ALL";
 let selectedCommitmentId="";
+// v1.9.0 Universal Capture Gateway state
+let pendingSharedCapture=null;
+let captureSourceDraft={sourceType:"MANUAL",sourceRef:"",sourceUrl:"",sharedTitle:"",capturedVia:"DIRECT"};
+const OPSYM_CAPTURE_SOURCES=["MANUAL","ANDROID_SHARE","WHATSAPP","SMS","EMAIL","BROWSER","NOTES","CALL","OTHER"];
+
 let liveHomeLastUpdatedAt=(()=>{try{return Number(localStorage.getItem("opsym_home_snapshot_at_v185")||0)||0;}catch(_){return 0;}})();
 const pendingTaskRequests=new Map();
 let activeOperationToken="";
@@ -328,6 +333,68 @@ async function completeTaskById(taskId,title=""){
   }
 }
 
+
+function normalizeCaptureSourceType(v){
+  const x=String(v||"").trim().toUpperCase().replace(/[\s-]+/g,"_");
+  if(OPSYM_CAPTURE_SOURCES.includes(x))return x;
+  if(/WHATSAPP/.test(x))return "WHATSAPP";
+  if(/GMAIL|EMAIL|MAIL/.test(x))return "EMAIL";
+  if(/SMS|MESSAGE/.test(x))return "SMS";
+  if(/BROWSER|CHROME|WEB/.test(x))return "BROWSER";
+  if(/ANDROID_SHARE/.test(x))return "ANDROID_SHARE";
+  if(/MOBILE_INBOX|MANUAL|DIRECT/.test(x))return "MANUAL";
+  return "OTHER";
+}
+function captureSourceLabel(v){
+  const x=normalizeCaptureSourceType(v);
+  return ({MANUAL:"Manual",ANDROID_SHARE:"Android share",WHATSAPP:"WhatsApp",SMS:"SMS",EMAIL:"Email",BROWSER:"Browser",NOTES:"Notes",CALL:"Call",OTHER:"Other"})[x]||"Other";
+}
+function detectSharedSource({title="",text="",url=""}={}){
+  const hay=(title+" "+text+" "+url).toLowerCase();
+  if(/whatsapp|wa\.me|api\.whatsapp/.test(hay))return "WHATSAPP";
+  if(/gmail|mail\.google|outlook|mailto:/.test(hay))return "EMAIL";
+  if(/sms:|messages?/.test(hay))return "SMS";
+  if(/^https?:/i.test(String(url||"")))return "BROWSER";
+  return "ANDROID_SHARE";
+}
+function readShareTargetFromUrl(){
+  try{
+    const q=new URLSearchParams(location.search);
+    if(q.get("share_target")!=="1" && !q.has("text") && !q.has("url"))return null;
+    const title=String(q.get("title")||"").trim();
+    const text=String(q.get("text")||"").trim();
+    const url=String(q.get("url")||"").trim();
+    const raw=[title,text].filter(Boolean).join(title&&text?"\n":"") || url;
+    if(!raw)return null;
+    return {rawText:raw,sharedTitle:title,sourceUrl:url,sourceRef:url||title,sourceType:detectSharedSource({title,text,url}),capturedVia:"WEB_SHARE_TARGET"};
+  }catch(_){return null;}
+}
+function applyPendingSharedCapture(){
+  if(!pendingSharedCapture)return;
+  captureEntryMode="inbox";
+  captureSourceDraft={
+    sourceType:normalizeCaptureSourceType(pendingSharedCapture.sourceType||"ANDROID_SHARE"),
+    sourceRef:String(pendingSharedCapture.sourceRef||""),
+    sourceUrl:String(pendingSharedCapture.sourceUrl||""),
+    sharedTitle:String(pendingSharedCapture.sharedTitle||""),
+    capturedVia:String(pendingSharedCapture.capturedVia||"WEB_SHARE_TARGET")
+  };
+}
+function readCaptureSourceForm(){
+  return {
+    sourceType:normalizeCaptureSourceType(document.getElementById("captureSourceType")?.value||captureSourceDraft.sourceType||"MANUAL"),
+    sourceRef:String(document.getElementById("captureSourceRef")?.value||captureSourceDraft.sourceRef||"").trim(),
+    sourceUrl:String(document.getElementById("captureSourceUrl")?.value||captureSourceDraft.sourceUrl||"").trim(),
+    sharedTitle:String(captureSourceDraft.sharedTitle||"").trim(),
+    capturedVia:String(captureSourceDraft.capturedVia||"DIRECT")
+  };
+}
+function clearSharedCaptureQuery(){
+  try{
+    const u=new URL(location.href);["share_target","title","text","url"].forEach(k=>u.searchParams.delete(k));
+    history.replaceState(history.state,"",u.pathname+(u.search?u.search:"")+location.hash);
+  }catch(_){}
+}
 
 async function interpretCaptureText(){
   if(captureInterpretInFlight) return false;
@@ -1138,7 +1205,7 @@ function recordOpsymPerf(eventName,data={}){
 function removePendingInbox(requestId){if(!liveInboxData?.items)return;liveInboxData.items=liveInboxData.items.filter(x=>x.pendingRequestId!==requestId);}
 function removePendingTask(requestId){if(!liveTasksData?.tasks)return;const before=liveTasksData.tasks.length;liveTasksData.tasks=liveTasksData.tasks.filter(x=>x.pendingRequestId!==requestId);if(liveTasksData.summary&&liveTasksData.tasks.length<before)liveTasksData.summary.open=Math.max(0,Number(liveTasksData.summary.open||0)-1);}
 
-async function captureToInbox(text){
+async function captureToInbox(text,sourceMeta=null){
   const clientT0=performance.now();
   if(inboxCaptureInFlight) return false;
 
@@ -1150,6 +1217,7 @@ async function captureToInbox(text){
   }
 
   const d=buildInboxDraft(text);
+  const provenance=sourceMeta||readCaptureSourceForm();
   const norm=v=>String(v||"").toLowerCase().replace(/[^\p{L}\p{N}]+/gu," ").replace(/\s+/g," ").trim();
   const sim=(x,y)=>{const A=new Set(norm(x).split(" ").filter(Boolean));const B=new Set(norm(y).split(" ").filter(Boolean));if(!A.size||!B.size)return 0;let n=0;A.forEach(t=>{if(B.has(t))n++;});return n/new Set([...A,...B]).size;};
 
@@ -1166,7 +1234,7 @@ async function captureToInbox(text){
   liveInboxData=liveInboxData||{summary:{open:0,total:0},items:[]};
   liveInboxData.items=liveInboxData.items||[];
   liveInboxData.items.unshift({
-    inboxId:"Saving…",pending:true,pendingRequestId:requestId,captured:new Date().toISOString(),source:"CAPTURING",
+    inboxId:"Saving…",pending:true,pendingRequestId:requestId,captured:new Date().toISOString(),source:captureSourceLabel(provenance.sourceType),sourceType:provenance.sourceType,sourceRef:provenance.sourceRef,sourceUrl:provenance.sourceUrl,signalId:"Saving…",
     rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,
     confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",status:"Pending"
   });
@@ -1181,7 +1249,7 @@ async function captureToInbox(text){
     let r=await submitMutationAndWait("capture-inbox",{
       rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,
       confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",
-      parserVersion:"semantic-local-v2.0+commitment-local-v1.1",forceDuplicate:String(score>=.72),source:"mobile_inbox_capture"
+      parserVersion:"semantic-local-v2.0+commitment-local-v1.1",forceDuplicate:String(score>=.72),source:"universal_capture_gateway",sourceType:provenance.sourceType,sourceRef:provenance.sourceRef,sourceUrl:provenance.sourceUrl,sharedTitle:provenance.sharedTitle,capturedVia:provenance.capturedVia
     },{requestId,timeoutMs:70000});
 
     if(r.status==="duplicate"){
@@ -1193,12 +1261,12 @@ async function captureToInbox(text){
       if(!again)return false;
 
       const requestId2=createClientRequestId().replace(/^create-/,"mutation-");
-      liveInboxData.items.unshift({inboxId:"Saving…",pending:true,pendingRequestId:requestId2,captured:new Date().toISOString(),source:"CAPTURING",rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",status:"Pending"});
+      liveInboxData.items.unshift({inboxId:"Saving…",pending:true,pendingRequestId:requestId2,captured:new Date().toISOString(),source:captureSourceLabel(provenance.sourceType),sourceType:provenance.sourceType,sourceRef:provenance.sourceRef,sourceUrl:provenance.sourceUrl,signalId:"Saving…",rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",status:"Pending"});
       liveInboxData.summary.open=Number(liveInboxData.summary.open||0)+1;liveInboxData.summary.total=Number(liveInboxData.summary.total||0)+1;
       render("inbox",true);
       const op2=beginOperation("Capturing separate Inbox item…");
       try{
-        r=await submitMutationAndWait("capture-inbox",{rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",parserVersion:"semantic-local-v2.0+commitment-local-v1.1",forceDuplicate:"true",source:"mobile_inbox_capture"},{requestId:requestId2,timeoutMs:70000});
+        r=await submitMutationAndWait("capture-inbox",{rawText:text,title:d.title,intent:d.intent,commitmentType:d.commitmentType,direction:d.direction,confidence:String(d.combinedConfidence),personName:d.personName||"",locationName:d.location||"",date:d.date||"",time:d.time||"",plannedHours:d.plannedHours||"",parserVersion:"semantic-local-v2.0+commitment-local-v1.1",forceDuplicate:"true",source:"universal_capture_gateway",sourceType:provenance.sourceType,sourceRef:provenance.sourceRef,sourceUrl:provenance.sourceUrl,sharedTitle:provenance.sharedTitle,capturedVia:provenance.capturedVia},{requestId:requestId2,timeoutMs:70000});
         removePendingInbox(requestId2);
         endOperation(op2,"Captured");
       }catch(e){removePendingInbox(requestId2);if(liveInboxData.summary){liveInboxData.summary.open=Math.max(0,Number(liveInboxData.summary.open||0)-1);liveInboxData.summary.total=Math.max(0,Number(liveInboxData.summary.total||0)-1);}render("inbox",true);endOperation(op2);throw e;}
@@ -1209,7 +1277,7 @@ async function captureToInbox(text){
 
     if(r.status!=="captured")throw new Error(r.error||r.message||"Inbox capture was not confirmed.");
 
-    liveInboxData.items.unshift({inboxId:r.inboxId,objectUuid:r.objectUuid||"",captured:new Date().toISOString(),source:"mobile_inbox_capture",rawText:text,title:r.title||d.title,intent:r.intent||d.intent,commitmentType:r.commitmentType||d.commitmentType,direction:r.direction||d.direction,confidence:r.confidence||String(d.combinedConfidence),personName:r.personName||d.personName||"",personUuid:r.personUuid||"",locationName:r.locationName||d.location||"",locationUuid:r.locationUuid||"",date:r.date||d.date||"",time:r.time||d.time||"",plannedHours:r.plannedHours||d.plannedHours||"",status:"Open"});
+    liveInboxData.items.unshift({inboxId:r.inboxId,objectUuid:r.objectUuid||"",captured:new Date().toISOString(),source:captureSourceLabel(provenance.sourceType),sourceType:r.sourceType||provenance.sourceType,sourceRef:r.sourceRef||provenance.sourceRef,sourceUrl:r.sourceUrl||provenance.sourceUrl,signalId:r.signalId||"",rawText:text,title:r.title||d.title,intent:r.intent||d.intent,commitmentType:r.commitmentType||d.commitmentType,direction:r.direction||d.direction,confidence:r.confidence||String(d.combinedConfidence),personName:r.personName||d.personName||"",personUuid:r.personUuid||"",locationName:r.locationName||d.location||"",locationUuid:r.locationUuid||"",date:r.date||d.date||"",time:r.time||d.time||"",plannedHours:r.plannedHours||d.plannedHours||"",status:"Open"});
     toast(r.timings?.totalMs?`Captured ${r.inboxId} in ${(r.timings.totalMs/1000).toFixed(1)}s`:`Captured ${r.inboxId}`);
     render("inbox",true);
     recordOpsymPerf("capture-inbox",{clientMs:Math.round(performance.now()-clientT0),server:r.timings||null,directAck:!!r.directAck,reconciled:!!r.reconciled});
@@ -1433,7 +1501,7 @@ function updateClarifyRules(){
 
   updateClarifySummary();
 }
-function collectClarify(id){const x=getInboxItem(id);return{inboxId:id,inboxUuid:x.objectUuid||"",rawText:x.rawText||"",title:document.getElementById("clarifyTitle")?.value.trim()||x.title||"",commitmentType:clarifyType(),direction:clarifyDirection(),personName:document.getElementById("clarifyPerson")?.value.trim()||"",locationName:document.getElementById("clarifyLocation")?.value.trim()||"",date:document.getElementById("clarifyDate")?.value||"",time:document.getElementById("clarifyTime")?.value||"",plannedHours:document.getElementById("clarifyHours")?.disabled?"":(document.getElementById("clarifyHours")?.value||""),intent:(document.getElementById("clarifyIntent")?.value.trim()||clarifyType()).toUpperCase()};}
+function collectClarify(id){const x=getInboxItem(id);return{inboxId:id,inboxUuid:x.objectUuid||"",rawText:x.rawText||"",title:document.getElementById("clarifyTitle")?.value.trim()||x.title||"",commitmentType:clarifyType(),direction:clarifyDirection(),personName:document.getElementById("clarifyPerson")?.value.trim()||"",locationName:document.getElementById("clarifyLocation")?.value.trim()||"",date:document.getElementById("clarifyDate")?.value||"",time:document.getElementById("clarifyTime")?.value||"",plannedHours:document.getElementById("clarifyHours")?.disabled?"":(document.getElementById("clarifyHours")?.value||""),intent:(document.getElementById("clarifyIntent")?.value.trim()||clarifyType()).toUpperCase(),signalId:x.signalId||"",sourceType:x.sourceType||"",sourceRef:x.sourceRef||"",sourceUrl:x.sourceUrl||"",capturedVia:x.capturedVia||""};}
 async function saveClarify(d){const r=await submitMutationAndWait("clarify-inbox",d);if(r.status!=="clarified")throw new Error(r.error||r.message||"Clarification failed.");return r;}
 async function clarifyToTask(id){
   const d=collectClarify(id);
@@ -1449,8 +1517,8 @@ async function clarifyToTask(id){
     plannedHours:d.commitmentType==="WAIT"?"":d.plannedHours,date:d.date,time:d.time,location:d.locationName,
     personName:d.personName,intent:d.intent,commitmentType:d.commitmentType,
     direction:d.direction,description:d.commitmentType==="WAIT"?`Waiting-for source: ${d.rawText}`:d.rawText,confidence:.99,
-    parserVersion:"clarified-v1.8.5",
-    sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid
+    parserVersion:"clarified-v1.9.0",
+    sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid,signalId:d.signalId||"",sourceType:d.sourceType||"",sourceRef:d.sourceRef||"",sourceUrl:d.sourceUrl||""
   };
   render("capture",true);
   return true;
@@ -1474,7 +1542,8 @@ async function clarifyToCommitment(id){
       inboxId:d.inboxId,inboxUuid:d.inboxUuid,rawText:d.rawText,title:d.title,
       commitmentType:d.commitmentType,direction:d.direction,personName:d.personName,
       locationName:d.locationName,date:d.date,time:d.time,
-      plannedHours:d.plannedHours,intent:d.intent,confidence:"1.0"
+      plannedHours:d.plannedHours,intent:d.intent,confidence:"1.0",
+      signalId:d.signalId,sourceType:d.sourceType,sourceRef:d.sourceRef,sourceUrl:d.sourceUrl,capturedVia:d.capturedVia
     },{timeoutMs:70000});
 
     if(r.status!=="promoted_commitment") throw new Error(r.error||r.message||"Commitment promotion failed.");
@@ -1487,7 +1556,7 @@ async function clarifyToCommitment(id){
     liveCommitmentsData=liveCommitmentsData||{summary:{open:0,waiting:0,closure:0,overdue:0},items:[]};
     liveCommitmentsData.items=liveCommitmentsData.items||[];
     if(!liveCommitmentsData.items.some(x=>String(x.commitmentId||"")===String(r.commitmentId||""))){
-      liveCommitmentsData.items.unshift({commitmentId:r.commitmentId,objectUuid:r.objectUuid||"",title:r.title||d.title,type:r.commitmentType||d.commitmentType,direction:r.direction||d.direction,personName:r.personName||d.personName,dueDate:r.dueDate||d.date,status:"Open"});
+      liveCommitmentsData.items.unshift({commitmentId:r.commitmentId,objectUuid:r.objectUuid||"",title:r.title||d.title,type:r.commitmentType||d.commitmentType,direction:r.direction||d.direction,personName:r.personName||d.personName,dueDate:r.dueDate||d.date,status:"Open",signalId:d.signalId||"",sourceType:d.sourceType||"",sourceRef:d.sourceRef||"",sourceUrl:d.sourceUrl||"",sourceInboxId:d.inboxId||"",rawText:d.rawText||""});
       if(liveCommitmentsData.summary) liveCommitmentsData.summary.open=Number(liveCommitmentsData.summary.open||0)+1;
     }
 
@@ -2063,7 +2132,7 @@ async function loadLiveCommitmentsData(force=false){
   if(!mobileBridge.endpoint)return false;if(liveCommitmentsLoading||(liveCommitmentsLoaded&&!force))return liveCommitmentsData;liveCommitmentsLoading=true;liveCommitmentsError=null;
   try{const p={action:'commitments'};if(mobileBridge.key)p.key=mobileBridge.key;const x=await jsonpRequest(mobileBridge.endpoint,p,12000,'Commitments data');if(!x||x.ok!==true)throw new Error(x?.error||'Could not load Commitments.');liveCommitmentsData=x.data||{summary:{open:0,waiting:0,closure:0,overdue:0},items:[]};liveCommitmentsLoaded=true;return liveCommitmentsData;}catch(err){liveCommitmentsError=err;throw err;}finally{liveCommitmentsLoading=false;}
 }
-function inboxRows(){const items=liveInboxData?.items||[];if(!items.length)return `<div class="empty-card"><strong>Inbox clear</strong></div>`;return items.map(x=>`<article class="inbox-row ${x.pending?"is-pending":""}"><div class="inbox-topline"><span class="source">${escapeHtml(x.source||"CAPTURE")}</span><span class="commitment-pill">${escapeHtml(x.commitmentType||"DO")}</span></div><h3>${escapeHtml(x.title||x.rawText)}</h3><p>${escapeHtml(x.rawText||"")}</p><div class="meta">${escapeHtml([x.personName,x.locationName,x.date,x.time].filter(Boolean).join(" · "))}</div>${x.pending?`<div class="pending-inline"><span class="opsym-operation-spinner" aria-hidden="true"></span><span>Saving securely…</span></div>`:`<div class="inbox-actions one-action"><button class="primary-btn compact inbox-clarify-btn" type="button" aria-label="Review and classify ${escapeHtml(x.inboxId)}" data-inbox-clarify="${escapeHtml(x.inboxId)}"><span>Review &amp; classify</span></button></div>`}</article>`).join("");}
+function inboxRows(){const items=liveInboxData?.items||[];if(!items.length)return `<div class="empty-card"><strong>Inbox clear</strong></div>`;return items.map(x=>`<article class="inbox-row ${x.pending?"is-pending":""}"><div class="inbox-topline"><span class="source">${escapeHtml(captureSourceLabel(x.sourceType||x.source||"OTHER"))}</span><span class="commitment-pill">${escapeHtml(x.commitmentType||"DO")}</span></div><h3>${escapeHtml(x.title||x.rawText)}</h3><p>${escapeHtml(x.rawText||"")}</p><div class="meta">${escapeHtml([x.personName,x.locationName,x.date,x.time].filter(Boolean).join(" · "))}</div>${x.pending?`<div class="pending-inline"><span class="opsym-operation-spinner" aria-hidden="true"></span><span>Saving securely…</span></div>`:`<div class="inbox-actions one-action"><button class="primary-btn compact inbox-clarify-btn" type="button" aria-label="Review and classify ${escapeHtml(x.inboxId)}" data-inbox-clarify="${escapeHtml(x.inboxId)}"><span>Review &amp; classify</span></button></div>`}</article>`).join("");}
 function commitmentRows(){const items=liveCommitmentsData?.items||[],filtered=activeCommitmentFilter==="ALL"?items:items.filter(x=>String(x.type||"DO").toUpperCase()===activeCommitmentFilter);if(!filtered.length)return `<div class="empty-card"><strong>No ${escapeHtml(activeCommitmentFilter==="ALL"?"open":activeCommitmentFilter)} commitments</strong></div>`;return filtered.map(x=>`<button type="button" class="commitment-card" data-open-commitment="${escapeHtml(x.commitmentId||"")}" aria-label="Open commitment ${escapeHtml(x.title||x.commitmentId)}"><div class="commitment-card-main"><div class="state">${escapeHtml(x.type||"DO")}</div><h3>${escapeHtml(x.title||x.commitmentId)}</h3><p>${escapeHtml([x.direction?`Direction: ${x.direction}`:"",x.personName||"",x.dueDate?`Review ${x.dueDate}`:""].filter(Boolean).join(" · "))}</p></div><span class="row-arrow" aria-hidden="true">›</span></button>`).join("");}
 function getCommitmentById(id){return (liveCommitmentsData?.items||[]).find(x=>String(x.commitmentId||"")===String(id||""))||null;}
 function commitmentDetail(){
@@ -2072,7 +2141,7 @@ function commitmentDetail(){
   const row=(label,value)=>value?`<div class="detail-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`:"";
   const sourceText=c.rawText||c.notes||"";
   const left=intro(String(c.type||"DO").toUpperCase(),c.title||c.commitmentId,`${c.direction?`Direction: ${c.direction}`:"Open commitment"}${c.personName?` · ${c.personName}`:""}`,`<button class="secondary-btn" type="button" data-route="commitments">Back to commitments</button>`,`champagne`);
-  const right=`<section class="section white commitment-detail-panel"><div class="section-head"><div><span class="kicker">${escapeHtml(c.commitmentId||"")}</span><h2>Commitment detail</h2><p>Open the record directly from any CICE class.</p></div></div><div class="detail-stack">${row("Type",c.type)}${row("Direction",c.direction)}${row("Person",c.personName)}${row("Due / review date",c.dueDate)}${row("Status",c.status)}${row("Source",c.source)}${row("Source Inbox",c.sourceInboxId)}${row("Object UUID",c.objectUuid)}</div>${sourceText?`<div class="detail-note"><span>Original context</span><p>${escapeHtml(sourceText)}</p></div>`:""}<div class="form-actions commitment-detail-actions"><button class="primary-btn" type="button" data-commitment-followup="${escapeHtml(c.commitmentId||"")}">${String(c.type||"").toUpperCase()==="WAIT"?"Create follow-up task":"Create related task"}</button></div></section>`;
+  const right=`<section class="section white commitment-detail-panel"><div class="section-head"><div><span class="kicker">${escapeHtml(c.commitmentId||"")}</span><h2>Commitment detail</h2><p>Open the record directly from any CICE class.</p></div></div><div class="detail-stack">${row("Type",c.type)}${row("Direction",c.direction)}${row("Person",c.personName)}${row("Due / review date",c.dueDate)}${row("Status",c.status)}${row("Source",captureSourceLabel(c.sourceType||c.source||"OTHER"))}${row("Source reference",c.sourceRef)}${row("Source link",c.sourceUrl)}${row("Signal",c.signalId)}${row("Source Inbox",c.sourceInboxId)}${row("Object UUID",c.objectUuid)}</div>${sourceText?`<div class="detail-note"><span>Original context</span><p>${escapeHtml(sourceText)}</p></div>`:""}<div class="form-actions commitment-detail-actions"><button class="primary-btn" type="button" data-commitment-followup="${escapeHtml(c.commitmentId||"")}">${String(c.type||"").toUpperCase()==="WAIT"?"Create follow-up task":"Create related task"}</button></div></section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function home(){
@@ -2330,7 +2399,13 @@ function capture(){
 
   const isCommitment=captureEntryMode==="commitment";
   const left=`<section class="capture-hero"><span class="eyebrow">${isCommitment?"COMMITMENT CAPTURE":"INBOX CAPTURE"}</span><h1 class="page-title">${isCommitment?"Capture the open loop.":"Get it out of your head."}</h1><p class="page-subtitle">Capture first. Op-Sym will interpret and classify it, but nothing becomes a task until you decide.</p></section>`;
-  const right=`<section class="section white"><form id="inboxCaptureForm" class="new-task-form"><label class="form-field full"><span>What do you need to remember?</span><textarea id="inboxCaptureText" rows="6" placeholder="e.g. Waiting for Gilbert to send the revised architecture next Tuesday"></textarea></label><div class="form-actions"><button class="ghost-btn" type="button" data-route="${isCommitment?"commitments":"inbox"}">Cancel</button><button class="primary-btn" type="submit">Capture to Inbox</button></div></form></section>`;
+  const shared=pendingSharedCapture;
+  if(shared) applyPendingSharedCapture();
+  const sourceType=normalizeCaptureSourceType(captureSourceDraft.sourceType||"MANUAL");
+  const prefill=shared?.rawText||"";
+  const sourceOptions=OPSYM_CAPTURE_SOURCES.map(v=>`<option value="${v}" ${sourceType===v?"selected":""}>${escapeHtml(captureSourceLabel(v))}</option>`).join("");
+  const sourceBanner=shared?`<div class="share-intake-banner"><strong>Shared into Op-Sym</strong><span>${escapeHtml(captureSourceLabel(sourceType))} content is ready for review. Nothing will be created until you press Capture to Inbox.</span></div>`:"";
+  const right=`<section class="section white"><form id="inboxCaptureForm" class="new-task-form">${sourceBanner}<label class="form-field full"><span>What do you need to remember?</span><textarea id="inboxCaptureText" rows="6" placeholder="e.g. Waiting for Gilbert to send the revised architecture next Tuesday">${escapeHtml(prefill)}</textarea></label><div class="capture-source-grid"><label class="form-field"><span>Source</span><select id="captureSourceType">${sourceOptions}</select></label><label class="form-field"><span>Source reference</span><input id="captureSourceRef" type="text" maxlength="300" placeholder="Optional sender, thread or note" value="${escapeHtml(captureSourceDraft.sourceRef||"")}"></label><label class="form-field full"><span>Source link</span><input id="captureSourceUrl" type="url" maxlength="1000" placeholder="Optional link back to the source" value="${escapeHtml(captureSourceDraft.sourceUrl||"")}"></label></div><div class="capture-consent-note">Op-Sym records only what you explicitly share or capture here. It does not silently read WhatsApp, SMS, calls or other apps.</div><div class="form-actions"><button class="ghost-btn" type="button" data-route="${isCommitment?"commitments":"inbox"}">Cancel</button><button class="primary-btn" type="submit">Capture to Inbox</button></div></form></section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function taskDetail(){
@@ -2565,7 +2640,7 @@ function bindDynamic(){
     createTaskFromForm();
   });
 
-  document.getElementById("inboxCaptureForm")?.addEventListener("submit",e=>{e.preventDefault();captureToInbox(document.getElementById("inboxCaptureText")?.value||"");});
+  document.getElementById("inboxCaptureForm")?.addEventListener("submit",e=>{e.preventDefault();const meta=readCaptureSourceForm();captureSourceDraft=meta;captureToInbox(document.getElementById("inboxCaptureText")?.value||"",meta).then(ok=>{if(ok){pendingSharedCapture=null;captureSourceDraft={sourceType:"MANUAL",sourceRef:"",sourceUrl:"",sharedTitle:"",capturedVia:"DIRECT"};clearSharedCaptureQuery();}});});
   document.querySelectorAll("[data-commitment-filter]").forEach(btn=>btn.addEventListener("click",()=>{activeCommitmentFilter=btn.dataset.commitmentFilter||"ALL";render("commitments",true);}));
 
   document.querySelectorAll("[data-capture-cancel]").forEach(btn=>btn.addEventListener("click",()=>{
@@ -2628,6 +2703,10 @@ document.querySelectorAll(".brand,.top-actions [data-route],.bottom-nav [data-ro
 window.addEventListener("popstate",()=>render(location.hash.replace("#","")||"home",true));
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>render(location.hash.replace("#","")||"home",true));
 
+if("serviceWorker" in navigator){window.addEventListener("load",()=>navigator.serviceWorker.register("./service-worker.js?v=190").catch(()=>null));}
+pendingSharedCapture=readShareTargetFromUrl();
+if(pendingSharedCapture) applyPendingSharedCapture();
+
 runBackendSetupFromQuery();
 
 try{
@@ -2636,7 +2715,7 @@ try{
   localInterpreterReady=false;
 }
 
-render(location.hash.replace("#","")||"home",true);
+render(pendingSharedCapture?"capture":(location.hash.replace("#","")||"home"),true);
 loadLiveTodayData(false);
 loadLiveTasksData(false);
 

@@ -1411,3 +1411,14 @@ body.opsym-modal-open{
 .task-card.is-pending{border-style:dashed;background:linear-gradient(180deg,#FFFFFF,#FBFDFF)}
 .task-card.is-pending .pill{background:#EEF4FF;color:#0F52FF}
 @media(max-width:520px){.detail-row{grid-template-columns:1fr;gap:3px}.home-freshness{text-align:left}}
+
+
+/* =========================================================
+   OP-SYM v1.9.0 UNIVERSAL CAPTURE GATEWAY
+   ========================================================= */
+.share-intake-banner{display:flex;flex-direction:column;gap:4px;padding:14px 15px;border:1px solid #cfe6dd;border-radius:16px;background:#f3fbf8;margin-bottom:14px}
+.share-intake-banner strong{font-size:13px;color:#173a34}.share-intake-banner span{font-size:12px;line-height:1.45;color:#5b716c}
+.capture-source-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:4px}.capture-source-grid .full{grid-column:1/-1}
+.capture-consent-note{font-size:11px;line-height:1.45;color:#738397;background:#f8fafc;border:1px solid #e7edf4;border-radius:12px;padding:10px 12px;margin:4px 0 2px}
+.source-provenance{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.source-provenance .source-pill{display:inline-flex;align-items:center;min-height:24px;padding:3px 8px;border-radius:999px;background:#eef7f5;border:1px solid #d8ebe6;font-size:10px;font-weight:800;color:#365f57;letter-spacing:.02em}
+@media(max-width:620px){.capture-source-grid{grid-template-columns:1fr}.capture-source-grid .full{grid-column:auto}}
