@@ -278,7 +278,7 @@ svg{display:block;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:
 .metric-card{min-height:92px;border-radius:18px;border:1px solid var(--line);background:#fff;padding:13px}
 .metric-card small{font-size:12px;color:var(--slate);font-weight:800}
 .metric-card strong{display:block;font-size:28px;margin-top:5px}
-.commitment-card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:14px}
+.commitment-card{width:100%;background:#fff;border:1px solid var(--line);border-radius:18px;padding:14px;text-align:left;font:inherit;color:inherit;display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;min-height:78px}
 .commitment-card h3{font-size:18px;margin:0}
 .commitment-card .state{font-size:12px;font-weight:850;color:var(--blue);margin-bottom:5px}
 .commitment-card p{font-size:14px;color:var(--slate);line-height:1.35;margin:5px 0 0}
@@ -1393,3 +1393,21 @@ body.opsym-modal-open{
 .pending-inline{display:flex;align-items:center;gap:8px;margin-top:12px;color:#64748B;font-size:12px;font-weight:750}
 .pending-inline .opsym-operation-spinner{color:#0F52FF}
 @media(max-width:520px){.opsym-operation-status{bottom:78px;font-size:12px;padding:10px 13px}}
+
+
+/* Op-Sym v1.8.4 - Live State + Fast Task Engine */
+.commitment-card-main{min-width:0;flex:1}
+.commitment-card .row-arrow{font-size:28px;color:#8A98AA;flex:0 0 auto}
+.commitment-card:focus-visible{outline:3px solid rgba(15,82,255,.22);outline-offset:2px}
+@media (hover:hover) and (pointer:fine){.commitment-card:hover{border-color:#B7C9E8;background:#FBFDFF}}
+.commitment-filter-strip{-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.commitment-filter-strip::-webkit-scrollbar{display:none}
+.commitment-filter.active{box-shadow:inset 0 -2px 0 #0F52FF}
+.commitment-detail-panel .detail-stack{display:grid;gap:0;border:1px solid #E5EDF7;border-radius:16px;overflow:hidden}
+.detail-row{display:grid;grid-template-columns:minmax(110px,.8fr) minmax(0,1.4fr);gap:12px;padding:12px 14px;border-bottom:1px solid #EAF0F6;align-items:start}
+.detail-row:last-child{border-bottom:0}.detail-row span{font-size:12px;color:#64748B;font-weight:750}.detail-row strong{font-size:13px;color:#19324F;overflow-wrap:anywhere}
+.detail-note{margin-top:14px;padding:14px;border-radius:14px;background:#F8FAFD;border:1px solid #E5EDF7}.detail-note span{font-size:11px;font-weight:850;color:#64748B;text-transform:uppercase;letter-spacing:.04em}.detail-note p{margin:6px 0 0;line-height:1.5;color:#334155}
+.home-freshness{font-size:10.5px;color:#64748B;text-align:right}
+.task-card.is-pending{border-style:dashed;background:linear-gradient(180deg,#FFFFFF,#FBFDFF)}
+.task-card.is-pending .pill{background:#EEF4FF;color:#0F52FF}
+@media(max-width:520px){.detail-row{grid-template-columns:1fr;gap:3px}.home-freshness{text-align:left}}

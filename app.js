@@ -47,7 +47,7 @@ const data = {
 let planningMode = "Conservative";
 
 /* -------------------------------------------------------
-   Mobile Backend Integration v1.8.3 - INSTANT INTERACTION + RELIABILITY
+   Mobile Backend Integration v1.8.4 - LIVE STATE + FAST TASK ENGINE
    Approved visual UI retained. Write interactions use non-blocking acknowledgement states.
 -------------------------------------------------------- */
 let liveHomeData = null;
@@ -79,6 +79,9 @@ let liveInboxLoaded=false, liveInboxLoading=false, liveInboxData=null, liveInbox
 let liveCommitmentsLoaded=false, liveCommitmentsLoading=false, liveCommitmentsData=null, liveCommitmentsError=null;
 let inboxCaptureInFlight=false, commitmentActionInFlight=false;
 let activeCommitmentFilter="ALL";
+let selectedCommitmentId="";
+let liveHomeLastUpdatedAt=0;
+const pendingTaskRequests=new Map();
 let activeOperationToken="";
 let activeOperationTimers=[];
 let clarifyReturnFocusEl=null;
@@ -165,20 +168,40 @@ async function loadLiveHomeData(showFailureToast=false){
   try{
     const params={action:"home"};
     if(mobileBridge.key) params.key=mobileBridge.key;
-    const payload=await jsonpRequest(mobileBridge.endpoint,params);
+    const payload=await jsonpRequest(mobileBridge.endpoint,params,12000,"Home data");
     if(!payload || payload.ok!==true) throw new Error(payload?.error || "Invalid Home response.");
     liveHomeData=payload.data || null;
     liveHomeLoaded=!!liveHomeData;
+    liveHomeLastUpdatedAt=Date.now();
     liveHomeError=null;
     if(liveHomeData?.planningMode) planningMode=liveHomeData.planningMode;
     if(currentRoute()==="home") render("home",true);
     return true;
   }catch(err){
     liveHomeError=err;
-    liveHomeLoaded=false;
-    if(showFailureToast) toast("Home data unavailable - using frozen demo view");
+    // Preserve the last known good Home snapshot instead of falling back to demo data.
+    if(!liveHomeData) liveHomeLoaded=false;
+    if(showFailureToast) toast(liveHomeData?"Home refresh delayed - showing last update":"Home data unavailable");
     return false;
   }
+}
+
+function invalidateLiveViews(...views){
+  const set=new Set(views.flat().map(x=>String(x||"").toLowerCase()));
+  if(set.has("home")){liveHomeLoaded=false;}
+  if(set.has("today")){liveTodayLoaded=false;}
+  if(set.has("tasks")){liveTasksLoaded=false;}
+  if(set.has("inbox")){liveInboxLoaded=false;}
+  if(set.has("commitments")){liveCommitmentsLoaded=false;}
+  if(set.has("task-detail")){liveTaskDetailLoaded=false;liveTaskDetailData=null;liveTaskDetailError=null;}
+}
+
+function refreshInvalidatedViews({home=false,today=false,tasks=false,inbox=false,commitments=false}={}){
+  if(home) loadLiveHomeData(false).catch(()=>null);
+  if(today) loadLiveTodayData(false).catch(()=>null);
+  if(tasks) loadLiveTasksData(false).catch(()=>null);
+  if(inbox) loadLiveInboxData(true).catch(()=>null);
+  if(commitments) loadLiveCommitmentsData(true).catch(()=>null);
 }
 
 async function loadLiveTodayData(showFailureToast=false){
@@ -1104,8 +1127,8 @@ function endOperation(token,message=""){if(token&&activeOperationToken!==token)r
 function recordOpsymPerf(eventName,data={}){
   try{
     const record={event:eventName,at:new Date().toISOString(),...data};
-    console.info("[Op-Sym v1.8.3 perf]",record);
-    const key="opsym_perf_v183";
+    console.info("[Op-Sym v1.8.4 perf]",record);
+    const key="opsym_perf_v184";
     const current=JSON.parse(localStorage.getItem(key)||"[]");
     current.push(record);
     localStorage.setItem(key,JSON.stringify(current.slice(-30)));
@@ -1136,7 +1159,7 @@ async function captureToInbox(text){
     if(!keep){render("inbox",true);return false;}
   }
 
-  // v1.8.3: Capture is deliberately frictionless. The Capture button itself is the user's intent.
+  // v1.8.4: Capture remains deliberately frictionless. The Capture button itself is the user's intent.
   // Show the object immediately while the server write is being confirmed.
   const requestId=createClientRequestId().replace(/^create-/,"mutation-");
   liveInboxData=liveInboxData||{summary:{open:0,total:0},items:[]};
@@ -1425,7 +1448,7 @@ async function clarifyToTask(id){
     plannedHours:d.commitmentType==="WAIT"?"":d.plannedHours,date:d.date,time:d.time,location:d.locationName,
     personName:d.personName,intent:d.intent,commitmentType:d.commitmentType,
     direction:d.direction,description:d.commitmentType==="WAIT"?`Waiting-for source: ${d.rawText}`:d.rawText,confidence:.99,
-    parserVersion:"clarified-v1.8.3",
+    parserVersion:"clarified-v1.8.4",
     sourceInboxId:d.inboxId,sourceInboxUuid:d.inboxUuid
   };
   render("capture",true);
@@ -1439,7 +1462,7 @@ async function clarifyToCommitment(id){
   if(!d) return false;
 
   // The clarification sheet is already the deliberate review step.
-  // v1.8.3 removes the redundant second confirmation.
+  // v1.8.4 retains the no-redundant-confirmation rule.
   commitmentActionInFlight=true;
   const btn=document.querySelector(`[data-clarify-commitment="${CSS.escape(String(id))}"]`);
   if(btn){btn.disabled=true;btn.textContent="Creating…";}
@@ -1511,94 +1534,123 @@ async function createTaskFromForm(){
   const semanticDraft=(captureEntryMode==="interpreted" && interpretedCaptureDraft) ? interpretedCaptureDraft : null;
   const fromInbox=!!semanticDraft?.sourceInboxId;
   const requestId=createClientRequestId();
-  const btn=document.querySelector('#newTaskForm button[type="submit"]');
-  if(btn){btn.disabled=true;btn.dataset.originalText=btn.textContent;btn.textContent="Creating…";}
+  const destination=captureEntryMode==="today"?"today":"tasks";
+  const sourceInboxId=semanticDraft?.sourceInboxId||"";
+  const isToday=!!date && date===new Date().toISOString().slice(0,10);
+  const provisionalId=`PENDING-${requestId.slice(-8).toUpperCase()}`;
+  const params={
+    action:fromInbox?"promote-inbox-task":"create-task",
+    requestId,title,role,project,priority,plannedHours,date,time,location,description,
+    captureSource: semanticDraft ? "natural_language" : (captureEntryMode==="today" ? "add_to_today" : "manual"),
+    rawCaptureText: semanticDraft?.sourceText || "",
+    parserVersion: semanticDraft?.parserVersion || "",
+    parsedIntent: semanticDraft?.intent || "",
+    captureConfidence: semanticDraft ? String(semanticDraft.confidence ?? "") : "",
+    personName: semanticDraft?.personName || "",
+    sourceInboxId,sourceInboxUuid: semanticDraft?.sourceInboxUuid || "",
+    inboxId:sourceInboxId,inboxUuid: semanticDraft?.sourceInboxUuid || "",
+    commitmentType: semanticDraft?.commitmentType || "",direction: semanticDraft?.direction || "",
+    intent: semanticDraft?.intent || "",locationName:location,rawText: semanticDraft?.sourceText || ""
+  };
+  if(mobileBridge.key) params.key=mobileBridge.key;
+
+  // v1.8.4: optimistic task creation. The user leaves the form immediately.
   createTaskInFlight=true;
-  const op=beginOperation("Creating task…");
+  liveTasksData=liveTasksData||{summary:{open:0,today:0,unscheduled:0,clashes:0},tasks:[]};
+  liveTasksData.tasks=liveTasksData.tasks||[];
+  const provisional={taskId:provisionalId,pending:true,pendingRequestId:requestId,title,status:"Saving",priority,role,project,location,description,plannedHours,scheduledDate:date,startTime:time,isToday,isUnscheduled:!date,hasClash:false,meta:[role,priority?priority+" priority":"",date?(isToday?"Today":date):"Unscheduled"].filter(Boolean).join(" · ")};
+  liveTasksData.tasks.unshift(provisional);
+  liveTasksData.summary.open=Number(liveTasksData.summary.open||0)+1;
+  if(isToday) liveTasksData.summary.today=Number(liveTasksData.summary.today||0)+1;
+  if(!date) liveTasksData.summary.unscheduled=Number(liveTasksData.summary.unscheduled||0)+1;
+  liveTasksLoaded=true;
+  pendingTaskRequests.set(requestId,provisional);
 
-  try{
-    const params={
-      action:fromInbox?"promote-inbox-task":"create-task",
-      requestId,title,role,project,priority,plannedHours,date,time,location,description,
-      captureSource: semanticDraft ? "natural_language" : (captureEntryMode==="today" ? "add_to_today" : "manual"),
-      rawCaptureText: semanticDraft?.sourceText || "",
-      parserVersion: semanticDraft?.parserVersion || "",
-      parsedIntent: semanticDraft?.intent || "",
-      captureConfidence: semanticDraft ? String(semanticDraft.confidence ?? "") : "",
-      personName: semanticDraft?.personName || "",
-      sourceInboxId: semanticDraft?.sourceInboxId || "",
-      sourceInboxUuid: semanticDraft?.sourceInboxUuid || "",
-      inboxId: semanticDraft?.sourceInboxId || "",
-      inboxUuid: semanticDraft?.sourceInboxUuid || "",
-      commitmentType: semanticDraft?.commitmentType || "",
-      direction: semanticDraft?.direction || "",
-      intent: semanticDraft?.intent || "",
-      locationName: location,
-      rawText: semanticDraft?.sourceText || ""
-    };
-    if(mobileBridge.key) params.key=mobileBridge.key;
+  if(sourceInboxId&&liveInboxData?.items){
+    liveInboxData.items=liveInboxData.items.filter(x=>x.inboxId!==sourceInboxId);
+    if(liveInboxData.summary) liveInboxData.summary.open=Math.max(0,Number(liveInboxData.summary.open||0)-1);
+  }
 
-    let result;
-    if(fromInbox){
-      const fields={...params};delete fields.action;delete fields.requestId;
-      result=await submitMutationAndWait("promote-inbox-task",fields,{requestId:requestId.replace(/^create-/,"mutation-"),timeoutMs:70000});
-    }else{
-      try{
-        const ack=await submitBridgePostWithAck(params,8000);
-        if(ack?.ok===false) throw new Error(ack.error||"Task creation failed.");
-        if(ack?.ok===true&&ack.data) result=ack.data;
-      }catch(ackErr){
-        if(!/acknowledgement not received/i.test(String(ackErr?.message||ackErr))) throw ackErr;
-        updateOperation(op,"Write received. Confirming task…");
-        try{result=await waitForCreateRequestStatus(requestId,{timeoutMs:70000});}
-        catch(waitErr){
-          try{result=await checkCreateRequestStatus(requestId,10000);}catch(_){throw waitErr;}
+  captureEntryMode="general";
+  interpretedCaptureDraft=null;
+  invalidateLiveViews("home","today");
+  render(destination,true);
+  toast("Task added - saving in the background");
+  createTaskInFlight=false;
+
+  // Persist independently so Apps Script latency never traps the user on the form.
+  (async()=>{
+    try{
+      let result;
+      if(fromInbox){
+        const fields={...params};delete fields.action;delete fields.requestId;
+        result=await submitMutationAndWait("promote-inbox-task",fields,{requestId:requestId.replace(/^create-/,"mutation-"),timeoutMs:70000});
+      }else{
+        try{
+          const ack=await submitBridgePostWithAck(params,8000);
+          if(ack?.ok===false) throw new Error(ack.error||"Task creation failed.");
+          if(ack?.ok===true&&ack.data) result=ack.data;
+        }catch(ackErr){
+          if(!/acknowledgement not received/i.test(String(ackErr?.message||ackErr))) throw ackErr;
+          result=await waitForCreateRequestStatus(requestId,{timeoutMs:70000});
         }
       }
+      if(result?.status==="error") throw new Error(result.error||result.message||"Task creation failed.");
+      if(result?.blocked){
+        removePendingTask_(requestId);
+        await opsymNotice({title:"Schedule conflict",message:`The task was not saved because the selected time conflicts with existing work.\n\n${formatConflictList(result.conflicts)}\n\nChoose another time and try again.`});
+        return;
+      }
+      if(!(result?.created || result?.status==="promoted_task")) throw new Error(result?.message||"The task was not verified as created.");
+      confirmPendingTask_(requestId,result,{title,role,project,priority,date,time,location,isToday});
+      recordOpsymPerf(fromInbox?"promote-inbox-task":"create-task",{clientMs:Math.round(performance.now()-clientT0),server:result.timings||null,directAck:!!result.directAck,reconciled:!!result.reconciled});
+      toast(result.timings?.totalMs?`Saved ${result.taskId||"task"} in ${(result.timings.totalMs/1000).toFixed(1)}s`:`Saved ${result.taskId||"task"}`);
+      invalidateLiveViews("home","today","tasks",...(sourceInboxId?["inbox"]:[]));
+      refreshInvalidatedViews({home:true,today:destination==="today",tasks:true,inbox:!!sourceInboxId});
+    }catch(err){
+      markPendingTaskFailed_(requestId,err?.message||String(err));
+      await opsymNotice({title:"Task still needs attention",message:`The task card has been marked as not confirmed.\n\nRequest ID: ${requestId}\n\n${err?.message||err}\n\nYou can retry after checking Tasks.`});
+    }finally{
+      pendingTaskRequests.delete(requestId);
+      createTaskInFlight=false;
     }
+  })();
+  return true;
+}
 
-    if(result.status==="error") throw new Error(result.error || result.message || "Task creation failed.");
-    if(result.blocked){
-      endOperation(op);
-      await opsymNotice({title:"Schedule conflict",message:`This time conflicts with existing work.
-
-${formatConflictList(result.conflicts)}
-
-Choose another time before creating the task.`});
-      return false;
-    }
-    if(!(result.created || result.status==="promoted_task")) throw new Error(result.message || "The task was not verified as created.");
-
-    // Add the confirmed task locally before any background refresh.
-    liveTasksData=liveTasksData||{summary:{open:0,today:0,unscheduled:0,clashes:0},tasks:[]};
-    liveTasksData.tasks=liveTasksData.tasks||[];
-    if(!liveTasksData.tasks.some(x=>x.taskId===result.taskId)){
-      const isToday=!!date && date===new Date().toISOString().slice(0,10);
-      liveTasksData.tasks.unshift({taskId:result.taskId,title:result.title||title,status:date?"Scheduled":"Open",priority,role,project,location,scheduledDate:date,startTime:time,isToday,isUnscheduled:!date,hasClash:false,meta:[role,priority?priority+" priority":"",date?(isToday?"Today":date):"Unscheduled"].filter(Boolean).join(" · ")});
-      liveTasksData.summary.open=Number(liveTasksData.summary.open||0)+1;
-      if(isToday) liveTasksData.summary.today=Number(liveTasksData.summary.today||0)+1;
-      if(!date) liveTasksData.summary.unscheduled=Number(liveTasksData.summary.unscheduled||0)+1;
-      liveTasksLoaded=true;
-    }
-
-    endOperation(op,"Task created");
-    recordOpsymPerf(fromInbox?"promote-inbox-task":"create-task",{clientMs:Math.round(performance.now()-clientT0),server:result.timings||null,directAck:!!result.directAck,reconciled:!!result.reconciled});
-    await finishSuccessfulTaskCreation(result);
-    return true;
-  }catch(err){
-    endOperation(op);
-    await opsymNotice({title:"Task not confirmed",message:`Op-Sym could not confirm task creation.
-
-Request ID: ${requestId}
-
-${err?.message||err}
-
-Check Tasks before pressing Create again.`});
-    return false;
-  }finally{
-    createTaskInFlight=false;
-    if(btn){btn.disabled=false;btn.textContent=btn.dataset.originalText||"Create task";}
+function removePendingTask_(requestId){
+  if(!liveTasksData?.tasks)return;
+  const before=liveTasksData.tasks.length;
+  const removed=liveTasksData.tasks.find(x=>x.pendingRequestId===requestId);
+  liveTasksData.tasks=liveTasksData.tasks.filter(x=>x.pendingRequestId!==requestId);
+  if(removed&&before!==liveTasksData.tasks.length&&liveTasksData.summary){
+    liveTasksData.summary.open=Math.max(0,Number(liveTasksData.summary.open||0)-1);
+    if(removed.isToday) liveTasksData.summary.today=Math.max(0,Number(liveTasksData.summary.today||0)-1);
+    if(removed.isUnscheduled) liveTasksData.summary.unscheduled=Math.max(0,Number(liveTasksData.summary.unscheduled||0)-1);
   }
+  if(currentRoute()==="tasks")render("tasks",true);
+}
+function confirmPendingTask_(requestId,result,fallback={}){
+  if(!liveTasksData?.tasks)return;
+  const i=liveTasksData.tasks.findIndex(x=>x.pendingRequestId===requestId);
+  const current=i>=0?liveTasksData.tasks[i]:null;
+  const confirmed={...(current||{}),pending:false,pendingRequestId:"",taskId:result.taskId||current?.taskId||"",title:result.title||fallback.title||current?.title||"Task",status:result.status||((fallback.date)?"Scheduled":"Open"),scheduledDate:result.scheduledDate||fallback.date||"",startTime:result.startTime||fallback.time||""};
+  if(i>=0)liveTasksData.tasks[i]=confirmed; else liveTasksData.tasks.unshift(confirmed);
+  if(currentRoute()==="tasks")render("tasks",true);
+}
+function markPendingTaskFailed_(requestId,message){
+  if(!liveTasksData?.tasks)return;
+  const x=liveTasksData.tasks.find(t=>t.pendingRequestId===requestId);
+  if(x){x.pending=false;x.saveFailed=true;x.status="Not confirmed";x.meta=[x.meta,"Save not confirmed"].filter(Boolean).join(" · ");x.saveError=message||"";}
+  if(currentRoute()==="tasks")render("tasks",true);
+}
+function retryFailedTask_(requestId){
+  const x=(liveTasksData?.tasks||[]).find(t=>t.pendingRequestId===requestId);
+  if(!x)return;
+  interpretedCaptureDraft={title:x.title||"",sourceText:x.description||x.title||"",role:x.role||"",project:x.project||"",priority:x.priority||"Medium",plannedHours:x.plannedHours||"",date:x.scheduledDate||"",time:x.startTime||"",location:x.location||"",personName:"",intent:"DO",commitmentType:"DO",direction:"ME",parserVersion:"retry-v1.8.4",confidence:1};
+  removePendingTask_(requestId);
+  captureEntryMode="interpreted";
+  render("capture");
 }
 
 function normalizeDateInput(value){
@@ -1982,9 +2034,9 @@ function taskCards(){
     return `<div class="empty-card"><strong>${labels[activeTaskFilter] || labels.all}</strong><small>This view is currently clear.</small></div>`;
   }
 
-  return items.map(t=>`<article class="task-card">
-    <div class="task-top"><div><h3>${escapeHtml(t.title)}</h3><div class="meta">${escapeHtml(t.meta || "")}</div></div><span class="pill">${escapeHtml(t.status || "Open")}</span></div>
-    <div class="task-actions"><button class="done" data-complete-task="${escapeHtml(t.taskId || "")}" data-task-title="${escapeHtml(t.title || "")}">Complete</button><button data-route="task-detail" data-task-id="${escapeHtml(t.taskId || "")}">Details</button></div>
+  return items.map(t=>`<article class="task-card ${t.pending?"is-pending":""}" data-pending-request="${escapeHtml(t.pendingRequestId||"")}">
+    <div class="task-top"><div><h3>${escapeHtml(t.title)}</h3><div class="meta">${escapeHtml(t.meta || "")}</div></div><span class="pill">${escapeHtml(t.pending?"Saving…":(t.status || "Open"))}</span></div>
+    ${t.pending?`<div class="pending-inline"><span class="opsym-operation-spinner" aria-hidden="true"></span><span>Saving securely in the background…</span></div>`:t.saveFailed?`<div class="task-actions"><button type="button" data-retry-failed-task="${escapeHtml(t.pendingRequestId||"")}">Retry</button><button type="button" data-dismiss-failed-task="${escapeHtml(t.pendingRequestId||"")}">Dismiss</button></div>`:`<div class="task-actions"><button class="done" data-complete-task="${escapeHtml(t.taskId || "")}" data-task-title="${escapeHtml(t.title || "")}">Complete</button><button data-route="task-detail" data-task-id="${escapeHtml(t.taskId || "")}">Details</button></div>`}
   </article>`).join("");
 }
 
@@ -2001,7 +2053,17 @@ async function loadLiveCommitmentsData(force=false){
   try{const p={action:'commitments'};if(mobileBridge.key)p.key=mobileBridge.key;const x=await jsonpRequest(mobileBridge.endpoint,p,12000,'Commitments data');if(!x||x.ok!==true)throw new Error(x?.error||'Could not load Commitments.');liveCommitmentsData=x.data||{summary:{open:0,waiting:0,closure:0,overdue:0},items:[]};liveCommitmentsLoaded=true;return liveCommitmentsData;}catch(err){liveCommitmentsError=err;throw err;}finally{liveCommitmentsLoading=false;}
 }
 function inboxRows(){const items=liveInboxData?.items||[];if(!items.length)return `<div class="empty-card"><strong>Inbox clear</strong></div>`;return items.map(x=>`<article class="inbox-row ${x.pending?"is-pending":""}"><div class="inbox-topline"><span class="source">${escapeHtml(x.source||"CAPTURE")}</span><span class="commitment-pill">${escapeHtml(x.commitmentType||"DO")}</span></div><h3>${escapeHtml(x.title||x.rawText)}</h3><p>${escapeHtml(x.rawText||"")}</p><div class="meta">${escapeHtml([x.personName,x.locationName,x.date,x.time].filter(Boolean).join(" · "))}</div>${x.pending?`<div class="pending-inline"><span class="opsym-operation-spinner" aria-hidden="true"></span><span>Saving securely…</span></div>`:`<div class="inbox-actions one-action"><button class="primary-btn compact inbox-clarify-btn" type="button" aria-label="Review and classify ${escapeHtml(x.inboxId)}" data-inbox-clarify="${escapeHtml(x.inboxId)}"><span>Review &amp; classify</span></button></div>`}</article>`).join("");}
-function commitmentRows(){const items=liveCommitmentsData?.items||[],filtered=activeCommitmentFilter==="ALL"?items:items.filter(x=>String(x.type||"DO").toUpperCase()===activeCommitmentFilter);if(!filtered.length)return `<div class="empty-card"><strong>No ${escapeHtml(activeCommitmentFilter==="ALL"?"open":activeCommitmentFilter)} commitments</strong></div>`;return filtered.map(x=>`<article class="commitment-card"><div class="state">${escapeHtml(x.type||"DO")}</div><h3>${escapeHtml(x.title||x.commitmentId)}</h3><p>${escapeHtml(x.direction?`Direction: ${x.direction}`:"")}</p></article>`).join("");}
+function commitmentRows(){const items=liveCommitmentsData?.items||[],filtered=activeCommitmentFilter==="ALL"?items:items.filter(x=>String(x.type||"DO").toUpperCase()===activeCommitmentFilter);if(!filtered.length)return `<div class="empty-card"><strong>No ${escapeHtml(activeCommitmentFilter==="ALL"?"open":activeCommitmentFilter)} commitments</strong></div>`;return filtered.map(x=>`<button type="button" class="commitment-card" data-open-commitment="${escapeHtml(x.commitmentId||"")}" aria-label="Open commitment ${escapeHtml(x.title||x.commitmentId)}"><div class="commitment-card-main"><div class="state">${escapeHtml(x.type||"DO")}</div><h3>${escapeHtml(x.title||x.commitmentId)}</h3><p>${escapeHtml([x.direction?`Direction: ${x.direction}`:"",x.personName||"",x.dueDate?`Review ${x.dueDate}`:""].filter(Boolean).join(" · "))}</p></div><span class="row-arrow" aria-hidden="true">›</span></button>`).join("");}
+function getCommitmentById(id){return (liveCommitmentsData?.items||[]).find(x=>String(x.commitmentId||"")===String(id||""))||null;}
+function commitmentDetail(){
+  const c=getCommitmentById(selectedCommitmentId);
+  if(!c){return `<section class="page"><section class="intro champagne"><span class="eyebrow">COMMITMENT</span><h1 class="page-title">Commitment unavailable</h1><p class="page-subtitle">Refresh Commitments and try again.</p><button class="secondary-btn" data-route="commitments">Back to commitments</button></section></section>`;}
+  const row=(label,value)=>value?`<div class="detail-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`:"";
+  const sourceText=c.rawText||c.notes||"";
+  const left=intro(String(c.type||"DO").toUpperCase(),c.title||c.commitmentId,`${c.direction?`Direction: ${c.direction}`:"Open commitment"}${c.personName?` · ${c.personName}`:""}`,`<button class="secondary-btn" type="button" data-route="commitments">Back to commitments</button>`,`champagne`);
+  const right=`<section class="section white commitment-detail-panel"><div class="section-head"><div><span class="kicker">${escapeHtml(c.commitmentId||"")}</span><h2>Commitment detail</h2><p>Open the record directly from any CICE class.</p></div></div><div class="detail-stack">${row("Type",c.type)}${row("Direction",c.direction)}${row("Person",c.personName)}${row("Due / review date",c.dueDate)}${row("Status",c.status)}${row("Source",c.source)}${row("Source Inbox",c.sourceInboxId)}${row("Object UUID",c.objectUuid)}</div>${sourceText?`<div class="detail-note"><span>Original context</span><p>${escapeHtml(sourceText)}</p></div>`:""}<div class="form-actions commitment-detail-actions"><button class="primary-btn" type="button" data-commitment-followup="${escapeHtml(c.commitmentId||"")}">${String(c.type||"").toUpperCase()==="WAIT"?"Create follow-up task":"Create related task"}</button></div></section>`;
+  return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
+}
 function home(){
   const [g,title,sub]=greeting();
   const hd=liveHomeData;
@@ -2016,6 +2078,7 @@ function home(){
       <div><span class="eyebrow">${g}</span><h1>${title}</h1><p>${sub}</p></div>
       <div class="hero-status-stack">
         <span class="now-chip">NOW · ${nowText()}</span>
+        <span class="home-freshness" aria-live="polite">${liveHomeLastUpdatedAt?`Updated ${Math.max(0,Math.round((Date.now()-liveHomeLastUpdatedAt)/1000))<10?"just now":Math.round((Date.now()-liveHomeLastUpdatedAt)/60000)+" min ago"}`:"Refreshing…"}</span>
         <button class="hero-mode-chip" id="heroModeButton" type="button" aria-label="Planning mode">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.7 2.9 8.2 7 10 4.1-1.8 7-5.3 7-10V6l-7-3Z"/><path d="m9.2 12 1.8 1.8 3.8-4"/></svg>
           <span>${escapeHtml(planningMode)}</span>
@@ -2350,7 +2413,7 @@ function taskDetail(){
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 
-const routes={home,today,tasks,inbox,week,month,year,commitments,analytics,more,settings,capture,"task-detail":taskDetail};
+const routes={home,today,tasks,inbox,week,month,year,commitments,analytics,more,settings,capture,"task-detail":taskDetail,"commitment-detail":commitmentDetail};
 
 function setActiveNav(route){
   document.querySelectorAll(".nav-item").forEach(b=>b.classList.toggle("active",b.dataset.route===route));
@@ -2367,6 +2430,10 @@ function render(route,replaceHash=false){
   document.getElementById("appMain").focus({preventScroll:true});
   window.scrollTo(0,0);
 
+  if(route==="home" && mobileBridge.endpoint){
+    // Stale-while-revalidate: render cached Home instantly, then silently refresh every time Home opens.
+    loadLiveHomeData(false).catch(()=>null);
+  }
   if(route==="today" && mobileBridge.endpoint && !liveTodayLoaded){
     loadLiveTodayData(false);
   }
@@ -2392,6 +2459,9 @@ document.addEventListener("click",e=>{
     openInboxClarifySheet(inboxClarify.dataset.inboxClarify);
     return;
   }
+const retryFailed=e.target.closest?.("[data-retry-failed-task]");if(retryFailed){e.preventDefault();retryFailedTask_(retryFailed.dataset.retryFailedTask||"");return;}const dismissFailed=e.target.closest?.("[data-dismiss-failed-task]");if(dismissFailed){e.preventDefault();removePendingTask_(dismissFailed.dataset.dismissFailedTask||"");return;}
+const openCommitment=e.target.closest?.("[data-open-commitment]");if(openCommitment){e.preventDefault();selectedCommitmentId=openCommitment.dataset.openCommitment||"";render("commitment-detail");return;}
+const followCommitment=e.target.closest?.("[data-commitment-followup]");if(followCommitment){e.preventDefault();const c=getCommitmentById(followCommitment.dataset.commitmentFollowup);if(c){const who=c.personName?` with ${c.personName}`:"";interpretedCaptureDraft={title:String(c.type||"").toUpperCase()==="WAIT"?`Follow up${who}`:`Follow up: ${c.title||"commitment"}`,sourceText:c.rawText||c.title||"",role:"",project:"",priority:"Medium",plannedHours:"",date:c.dueDate||"",time:"",location:"",personName:c.personName||"",intent:"DO",commitmentType:"DO",direction:"ME",parserVersion:"commitment-followup-v1.8.4",confidence:.99};captureEntryMode="interpreted";render("capture");}return;}
 if(e.target.closest?.("[data-close-inbox-clarify]")){closeInboxClarifySheet();return;}const t=e.target.closest?.("[data-clarify-type]");if(t){document.querySelectorAll("[data-clarify-type]").forEach(x=>x.classList.toggle("selected",x===t));const rec=t.dataset.clarifyType==="WAIT"||t.dataset.clarifyType==="DELEGATE"?"OTHER":t.dataset.clarifyType==="MEET"?"SHARED":t.dataset.clarifyType==="DECIDE"?"ME":null;if(rec)document.querySelectorAll("[data-clarify-direction]").forEach(x=>x.classList.toggle("selected",x.dataset.clarifyDirection===rec));document.getElementById("clarifyIntent").value=t.dataset.clarifyType;updateClarifyRules();return;}const d=e.target.closest?.("[data-clarify-direction]");if(d){document.querySelectorAll("[data-clarify-direction]").forEach(x=>x.classList.toggle("selected",x===d));return;}const ct=e.target.closest?.("[data-clarify-task]");if(ct){clarifyToTask(ct.dataset.clarifyTask);return;}const cc=e.target.closest?.("[data-clarify-commitment]");if(cc){clarifyToCommitment(cc.dataset.clarifyCommitment);return;}const di=e.target.closest?.("[data-clarify-dismiss]");if(di){closeInboxClarifySheet();dismissInboxItem(di.dataset.clarifyDismiss);return;}});
 document.addEventListener("input",e=>{
   if(
@@ -2556,7 +2626,6 @@ try{
 }
 
 render(location.hash.replace("#","")||"home",true);
-loadLiveHomeData(false);
 loadLiveTodayData(false);
 loadLiveTasksData(false);
 
