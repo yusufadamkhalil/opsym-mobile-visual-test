@@ -2301,6 +2301,25 @@ function more(){
   ];
   return `<section class="page"><section class="intro"><span class="eyebrow">MORE</span><h1 class="page-title">Everything else.</h1><p class="page-subtitle">Less-used areas stay one tap away without crowding everyday navigation.</p></section><section class="section"><div class="more-grid">${items.map(i=>`<button class="more-card" data-route="${i[1]}">${icon(i[0])}<strong>${i[2]}</strong><small>${i[3]}</small></button>`).join("")}</div></section></section>`;
 }
+async function showPwaDiagnostics(){
+  const standalone=!!(window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone===true);
+  const manifestLink=document.querySelector('link[rel="manifest"]')?.href||"Not linked";
+  const swSupported="serviceWorker" in navigator;
+  let registration=null;
+  try{ if(swSupported) registration=await navigator.serviceWorker.getRegistration("./"); }catch(_){ registration=null; }
+  const controlled=!!navigator.serviceWorker?.controller;
+  const q=new URLSearchParams(location.search);
+  const shareLaunch=q.get("share_target")==="1" || q.has("text") || q.has("url") || q.has("title");
+  const lines=[
+    `Installed/standalone mode: ${standalone?"YES":"NO"}`,
+    `Service worker supported: ${swSupported?"YES":"NO"}`,
+    `Service worker registered: ${registration?"YES":"NO"}`,
+    `Page controlled by worker: ${controlled?"YES":"NO"}`,
+    `Share payload detected on this launch: ${shareLaunch?"YES":"NO"}`,
+    `Manifest: ${manifestLink}`
+  ];
+  await opsymNotice({title:"PWA & sharing diagnostics",message:lines.join("\n")});
+}
 function settings(){
   const row=(ic,title,sub,end)=>`<button class="setting-row" data-demo="${title}"><span class="row-icon">${icon(ic)}</span><span class="row-copy"><strong>${title}</strong><small>${sub}</small></span>${end}</button>`;
   const right=`<section class="section"><div class="settings-group">
@@ -2309,6 +2328,7 @@ function settings(){
     ${row("alert","Notifications","Quiet hours and reminders",`<span class="toggle on"></span>`)}
     ${row("target","CICE","Closure and waiting-for intelligence",`<span class="toggle on"></span>`)}
     ${row("monitor","Interface","Mobile visual prototype",`<span class="setting-value">Mobile</span>`)}
+    <button class="setting-row" type="button" data-pwa-diagnostics><span class="row-icon">${icon("monitor")}</span><span class="row-copy"><strong>PWA & sharing diagnostics</strong><small>Check standalone mode, service worker and share launch.</small></span><span class="setting-value">Check</span></button>
   </div></section>`;
   const left=intro("SETTINGS","Make Op-Sym work your way.","Preferences should support your workflow without becoming another task.");
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
@@ -2681,6 +2701,8 @@ function bindDynamic(){
     loadLiveTaskDetailData(selectedTaskId,true);
   }));
 
+  document.querySelectorAll("[data-pwa-diagnostics]").forEach(btn=>btn.addEventListener("click",e=>{e.preventDefault();showPwaDiagnostics();}));
+
   const heroModeButton=document.getElementById("heroModeButton");
   if(heroModeButton){
     heroModeButton.addEventListener("click",()=>{
@@ -2703,7 +2725,7 @@ document.querySelectorAll(".brand,.top-actions [data-route],.bottom-nav [data-ro
 window.addEventListener("popstate",()=>render(location.hash.replace("#","")||"home",true));
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>render(location.hash.replace("#","")||"home",true));
 
-if("serviceWorker" in navigator){window.addEventListener("load",()=>navigator.serviceWorker.register("./service-worker.js?v=190").catch(()=>null));}
+if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1901",{scope:"./"});await reg.update();}catch(_){}});}
 pendingSharedCapture=readShareTargetFromUrl();
 if(pendingSharedCapture) applyPendingSharedCapture();
 

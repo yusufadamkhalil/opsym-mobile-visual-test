@@ -1422,3 +1422,5 @@ body.opsym-modal-open{
 .capture-consent-note{font-size:11px;line-height:1.45;color:#738397;background:#f8fafc;border:1px solid #e7edf4;border-radius:12px;padding:10px 12px;margin:4px 0 2px}
 .source-provenance{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.source-provenance .source-pill{display:inline-flex;align-items:center;min-height:24px;padding:3px 8px;border-radius:999px;background:#eef7f5;border:1px solid #d8ebe6;font-size:10px;font-weight:800;color:#365f57;letter-spacing:.02em}
 @media(max-width:620px){.capture-source-grid{grid-template-columns:1fr}.capture-source-grid .full{grid-column:auto}}
+
+/* Op-Sym v1.9.0.1: Android PWA/share-target hotfix. No visual layout redesign. */
