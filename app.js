@@ -181,7 +181,7 @@ async function loadLiveHomeData(showFailureToast=false){
     liveHomeError=null;
     try{localStorage.setItem("opsym_home_snapshot_v185",JSON.stringify(liveHomeData));localStorage.setItem("opsym_home_snapshot_at_v185",String(liveHomeLastUpdatedAt));}catch(_){}
     if(liveHomeData?.planningMode) planningMode=liveHomeData.planningMode;
-    if(currentRoute()==="home") render("home",true);
+    if(currentRoute()==="home") render("home",true,{suppressRefresh:true,silent:true});
     return true;
   }catch(err){
     liveHomeError=err;
@@ -2530,18 +2530,25 @@ function setActiveNav(route){
     document.querySelector('.nav-item[data-route="more"]')?.classList.add("active");
   }
 }
-function render(route,replaceHash=false){
+function render(route,replaceHash=false,options={}){
   const fn=routes[route]||routes.home;
-  document.getElementById("appMain").innerHTML=fn();
+  const opts=options||{};
+  const appMain=document.getElementById("appMain");
+  if(opts.silent) appMain.classList.add("silent-render");
+  appMain.innerHTML=fn();
   setActiveNav(route);
   if(!replaceHash) history.pushState({route},"","#"+route);
   bindDynamic();
   document.getElementById("appMain").focus({preventScroll:true});
   window.scrollTo(0,0);
 
-  if(route==="home" && mobileBridge.endpoint){
-    // Stale-while-revalidate: render cached Home instantly, then silently refresh every time Home opens.
+  if(route==="home" && mobileBridge.endpoint && !opts.suppressRefresh){
+    // Stale-while-revalidate: refresh once when Home is opened.
+    // Background refresh re-renders Home with suppressRefresh=true so it cannot create a refresh loop.
     loadLiveHomeData(false).catch(()=>null);
+  }
+  if(opts.silent){
+    requestAnimationFrame(()=>appMain.classList.remove("silent-render"));
   }
   if(route==="today" && mobileBridge.endpoint && !liveTodayLoaded){
     loadLiveTodayData(false);
