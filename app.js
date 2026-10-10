@@ -59,7 +59,7 @@ let liveTodayLoaded = false;
 let liveTodayError = null;
 
 
-const OPSYM_UI_VERSION="1.9.1.3-nav-diagnostic";
+const OPSYM_UI_VERSION="1.9.1.4-render-runtime-fix";
 const OPSYM_NATIVE_WRAPPER_VERSION="1.9.0-native.2";
 const opsymDiag={
   uiVersion:OPSYM_UI_VERSION,
@@ -2954,7 +2954,7 @@ function setActiveNav(route){
     document.querySelector('.nav-item[data-route="more"]')?.classList.add("active");
   }
 }
-function render(route,replaceHash=false){
+function render(route,replaceHash=false,options={}){
   route=routes[route]?route:"home";
   activeRoute=route;
 
@@ -3201,7 +3201,7 @@ document.addEventListener("click",e=>{
 window.addEventListener("popstate",()=>{activeRoute=location.hash.replace("#","")||"home";safeNavigate_(activeRoute,{replace:true});});
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
 
-if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1908",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
+if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1914",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
 pendingSharedCapture=readShareTargetFromUrl();
 if(pendingSharedCapture) applyPendingSharedCapture();
 
