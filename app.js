@@ -1622,7 +1622,12 @@ async function createTaskFromForm(){
     sourceInboxId,sourceInboxUuid: semanticDraft?.sourceInboxUuid || "",
     inboxId:sourceInboxId,inboxUuid: semanticDraft?.sourceInboxUuid || "",
     commitmentType: semanticDraft?.commitmentType || "",direction: semanticDraft?.direction || "",
-    intent: semanticDraft?.intent || "",locationName:location,rawText: semanticDraft?.sourceText || ""
+    intent: semanticDraft?.intent || "",locationName:location,rawText: semanticDraft?.sourceText || "",
+    signalId: semanticDraft?.signalId || "",
+    sourceType: semanticDraft?.sourceType || "",
+    sourceRef: semanticDraft?.sourceRef || "",
+    sourceUrl: semanticDraft?.sourceUrl || "",
+    capturedVia: semanticDraft?.capturedVia || ""
   };
   if(mobileBridge.key) params.key=mobileBridge.key;
 
@@ -1656,7 +1661,7 @@ async function createTaskFromForm(){
       let result;
       if(fromInbox){
         const fields={...params};delete fields.action;delete fields.requestId;
-        result=await submitMutationAndWait("promote-inbox-task",fields,{requestId:requestId.replace(/^create-/,"mutation-"),timeoutMs:30000});
+        result=await submitMutationAndWait("promote-inbox-task",fields,{requestId:requestId.replace(/^create-/,"mutation-"),timeoutMs:15000});
       }else{
         try{
           const ack=await submitBridgePostWithAck(params,8000);
