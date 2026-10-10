@@ -1425,3 +1425,14 @@ body.opsym-modal-open{
 @media(max-width:620px){.capture-source-grid{grid-template-columns:1fr}.capture-source-grid .full{grid-column:auto}}
 
 /* Op-Sym v1.9.0.1: Android PWA/share-target hotfix. No visual layout redesign. */
+
+/* v1.9.0.8 final navigation stabilization */
+.bottom-nav{
+  z-index:14050 !important;
+  pointer-events:auto !important;
+}
+.bottom-nav .nav-item,
+.bottom-nav .capture-nav{
+  pointer-events:auto !important;
+  touch-action:manipulation;
+}

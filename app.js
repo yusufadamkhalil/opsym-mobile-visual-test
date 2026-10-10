@@ -241,6 +241,7 @@ async function loadLiveTasksData(showFailureToast=false){
     liveTasksData=payload.data || null;
     liveTasksLoaded=!!liveTasksData;
     liveTasksError=null;
+    reconcileLoadedCanonicalTasks_();
     if(currentRoute()==="tasks") render("tasks",true);
     return true;
   }catch(err){
@@ -1635,7 +1636,7 @@ async function createTaskFromForm(){
   createTaskInFlight=true;
   liveTasksData=liveTasksData||{summary:{open:0,today:0,unscheduled:0,clashes:0},tasks:[]};
   liveTasksData.tasks=liveTasksData.tasks||[];
-  const provisional={taskId:provisionalId,pending:true,pendingRequestId:requestId,pendingStartedAt:Date.now(),title,status:"Saving",priority,role,project,location,description,plannedHours,scheduledDate:date,startTime:time,isToday,isUnscheduled:!date,hasClash:false,meta:[role,priority?priority+" priority":"",date?(isToday?"Today":date):"Unscheduled"].filter(Boolean).join(" · ")};
+  const provisional={taskId:provisionalId,pending:true,pendingRequestId:requestId,pendingStartedAt:Date.now(),sourceInboxId,title,status:"Saving",priority,role,project,location,description,plannedHours,scheduledDate:date,startTime:time,isToday,isUnscheduled:!date,hasClash:false,meta:[role,priority?priority+" priority":"",date?(isToday?"Today":date):"Unscheduled"].filter(Boolean).join(" · ")};
   liveTasksData.tasks.unshift(provisional);
   liveTasksData.summary.open=Number(liveTasksData.summary.open||0)+1;
   if(isToday) liveTasksData.summary.today=Number(liveTasksData.summary.today||0)+1;
@@ -1658,6 +1659,16 @@ async function createTaskFromForm(){
   // v1.9.0.6: independently reconcile against the canonical Tasks endpoint.
   // This clears the optimistic Saving state as soon as the durable Task row exists,
   // even if mutation acknowledgement or enrichment is still delayed.
+  // Authoritative reconciliation: the backend mutation record is the primary
+  // truth for whether an Inbox promotion has durably created a Task.
+  if(fromInbox){
+    reconcilePendingTaskFromMutationStatus_(requestId,{
+      title,role,project,priority,date,time,location,isToday
+    }).catch(()=>false);
+  }
+
+  // Canonical Tasks-list lookup remains a fallback for older deployments or
+  // situations where the mutation-status acknowledgement is delayed.
   reconcilePendingTaskFromCanonical_(requestId,{
     title,date,time,sourceInboxId
   }).catch(()=>false);
@@ -1668,7 +1679,7 @@ async function createTaskFromForm(){
       let result;
       if(fromInbox){
         const fields={...params};delete fields.action;delete fields.requestId;
-        result=await submitMutationAndWait("promote-inbox-task",fields,{requestId:requestId.replace(/^create-/,"mutation-"),timeoutMs:15000});
+        result=await submitMutationAndWait("promote-inbox-task",fields,{requestId,timeoutMs:45000});
       }else{
         try{
           const ack=await submitBridgePostWithAck(params,8000);
@@ -1706,6 +1717,32 @@ async function createTaskFromForm(){
 }
 
 
+
+function reconcileLoadedCanonicalTasks_(){
+  if(!liveTasksData?.tasks)return 0;
+  const all=liveTasksData.tasks||[];
+  const canonical=all.filter(t=>!t.pending);
+  if(!canonical.length)return 0;
+  let cleared=0;
+
+  liveTasksData.tasks=all.filter(t=>{
+    if(!t.pending)return true;
+    const match=findCanonicalTaskForPending_(canonical,{
+      sourceInboxId:t.sourceInboxId||"",
+      title:t.title||"",
+      date:t.scheduledDate||"",
+      time:t.startTime||""
+    });
+    if(match){
+      pendingTaskRequests.delete(t.pendingRequestId);
+      cleared++;
+      return false;
+    }
+    return true;
+  });
+  return cleared;
+}
+
 function hasPendingTaskRequest_(requestId){
   return !!(liveTasksData?.tasks||[]).some(t=>t.pendingRequestId===requestId);
 }
@@ -1729,27 +1766,51 @@ function findCanonicalTaskForPending_(tasks,expected={}){
     return sameTitle&&sameDate&&sameTime;
   })||null;
 }
-async function reconcilePendingTaskFromCanonical_(requestId,expected={},options={}){
+
+async function reconcilePendingTaskFromMutationStatus_(requestId,fallback={}){
   if(!mobileBridge.endpoint)return false;
-  const delays=Array.isArray(options.delays)?options.delays:[1200,1800,2500,3500,5000];
-  for(const delay of delays){
+  const deadline=Date.now()+120000;
+  while(Date.now()<deadline){
     if(!hasPendingTaskRequest_(requestId))return true;
-    await new Promise(r=>setTimeout(r,delay));
+    await new Promise(r=>setTimeout(r,900));
     if(!hasPendingTaskRequest_(requestId))return true;
     try{
-      const params={action:"tasks"};
+      const status=await checkMutationStatus(requestId,5000);
+      if(status?.status==="promoted_task" && status?.taskId){
+        confirmPendingTask_(requestId,status,fallback);
+        toast(`Saved ${status.taskId}`);
+        invalidateLiveViews("home","today","tasks","inbox");
+        refreshInvalidatedViews({home:true,today:false,tasks:true,inbox:true});
+        return true;
+      }
+      if(status?.status==="blocked" || status?.status==="error") return false;
+    }catch(_){}
+  }
+  return false;
+}
+
+async function reconcilePendingTaskFromCanonical_(requestId,expected={},options={}){
+  if(!mobileBridge.endpoint)return false;
+  const deadline=Date.now()+Number(options.timeoutMs||180000);
+  let attempt=0;
+  while(Date.now()<deadline){
+    if(!hasPendingTaskRequest_(requestId))return true;
+    await new Promise(r=>setTimeout(r,attempt<2?900:1500));
+    attempt++;
+    if(!hasPendingTaskRequest_(requestId))return true;
+    try{
+      const params={action:"tasks",_ts:String(Date.now())};
       if(mobileBridge.key)params.key=mobileBridge.key;
       const payload=await jsonpRequest(mobileBridge.endpoint,params,8000);
       if(!payload||payload.ok!==true||!payload.data)continue;
       const canonical=findCanonicalTaskForPending_(payload.data.tasks,expected);
       if(!canonical)continue;
 
-      // Canonical durability is the success boundary. Replace the optimistic
-      // collection with server truth immediately; enrichment may continue.
       liveTasksData=payload.data;
       liveTasksLoaded=true;
       liveTasksError=null;
       pendingTaskRequests.delete(requestId);
+      reconcileLoadedCanonicalTasks_();
       if(currentRoute()==="tasks")render("tasks",true);
       toast(`Saved ${canonical.taskId||"task"}`);
       return true;
@@ -2167,9 +2228,9 @@ function timelineRows(){
 }
 function pendingTaskState_(t){
   const age=Math.max(0,Date.now()-Number(t.pendingStartedAt||Date.now()));
-  if(age<4000)return {pill:"Saving…",detail:"Writing the task securely…"};
-  if(age<10000)return {pill:"Confirming…",detail:"The task was sent. Op-Sym is confirming the saved record."};
-  return {pill:"Checking saved task…",detail:"Op-Sym is reconciling with the canonical Tasks list."};
+  if(age<2500)return {pill:"Saving…",detail:"Writing the task securely…"};
+  if(age<8000)return {pill:"Confirming…",detail:"Checking the backend confirmation…"};
+  return {pill:"Verifying…",detail:"The request was sent. Op-Sym is verifying the backend record."};
 }
 
 function taskCards(){
@@ -2594,6 +2655,34 @@ function taskDetail(){
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 
+
+function clearTransientUiForNavigation_(){
+  document.querySelectorAll(
+    ".smart-sheet-backdrop,.opsym-confirm-backdrop,.smart-reschedule-overlay,#inboxClarifyBackdrop"
+  ).forEach(el=>{try{el.remove();}catch(_){}});
+  document.body.classList.remove("opsym-modal-open");
+  document.body.style.overflow="";
+  document.documentElement.style.overflow="";
+}
+
+function safeNavigate_(route,options={}){
+  const r=routes[route]?route:"home";
+  clearTransientUiForNavigation_();
+  try{
+    render(r,!!options.replace);
+  }catch(err){
+    try{
+      const main=document.getElementById("appMain");
+      if(main)main.innerHTML=home();
+      setActiveNav("home");
+      history.replaceState({route:"home"},"","#home");
+      bindDynamic();
+      window.scrollTo(0,0);
+      toast("Navigation recovered");
+    }catch(_){}
+  }
+}
+
 const routes={home,today,tasks,inbox,week,month,year,commitments,analytics,more,settings,capture,"task-detail":taskDetail,"commitment-detail":commitmentDetail};
 
 function setActiveNav(route){
@@ -2710,7 +2799,7 @@ function bindDynamic(){
         captureEntryMode=el.dataset.captureMode || "general";
       }
 
-      render(r);
+      safeNavigate_(r);
     });
   });
   document.querySelectorAll("[data-demo]").forEach(el=>{
@@ -2801,13 +2890,20 @@ function toast(msg){
   clearTimeout(window.__toastTimer);window.__toastTimer=setTimeout(()=>t.classList.remove("show"),1700);
 }
 
-document.querySelectorAll(".brand,.top-actions [data-route],.bottom-nav [data-route]").forEach(el=>{
-  el.addEventListener("click",()=>render(el.dataset.route));
-});
-window.addEventListener("popstate",()=>render(location.hash.replace("#","")||"home",true));
-matchMedia("(orientation: landscape)").addEventListener?.("change",()=>render(location.hash.replace("#","")||"home",true));
+document.addEventListener("pointerdown",e=>{
+  const el=e.target.closest?.(".brand,.top-actions [data-route],.bottom-nav [data-route]");
+  if(!el)return;
+  const route=el.dataset.route || (el.classList.contains("brand")?"home":"");
+  if(!route)return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  safeNavigate_(route);
+},{capture:true});
 
-if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1902",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
+window.addEventListener("popstate",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
+matchMedia("(orientation: landscape)").addEventListener?.("change",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
+
+if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1908",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
 pendingSharedCapture=readShareTargetFromUrl();
 if(pendingSharedCapture) applyPendingSharedCapture();
 
