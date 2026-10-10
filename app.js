@@ -59,7 +59,7 @@ let liveTodayLoaded = false;
 let liveTodayError = null;
 
 
-const OPSYM_UI_VERSION="1.9.1.2-route-state-fix";
+const OPSYM_UI_VERSION="1.9.1.3-nav-diagnostic";
 const OPSYM_NATIVE_WRAPPER_VERSION="1.9.0-native.2";
 const opsymDiag={
   uiVersion:OPSYM_UI_VERSION,
@@ -128,6 +128,17 @@ function escapeHtml(value){
     .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
     .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
 }
+
+
+const opsymNavDiag={
+  lastSuccessfulRoute:"",
+  lastSuccessfulRouteAt:"",
+  lastAttemptedRoute:"",
+  lastAttemptedRouteAt:"",
+  lastNavigationError:"",
+  lastNavigationStack:"",
+  navigationRecoveredAt:""
+};
 
 let activeRoute=(location.hash.replace("#","")||"home");
 
@@ -2641,6 +2652,10 @@ function diagnosticsPanel_(){
       <div><span>confirmPendingTask()</span><strong>${opsymDiag.confirmPendingTaskRan?"YES":"NO"}</strong></div>
       <div><span>Confirmed Task ID</span><strong>${escapeHtml(opsymDiag.lastConfirmedTaskId||"—")}</strong></div>
       <div><span>Last task error</span><strong>${escapeHtml(opsymDiag.lastTaskError||"None")}</strong></div>
+      <div><span>Last attempted route</span><strong>${escapeHtml(opsymDiag.lastAttemptedRoute||"—")}</strong></div>
+      <div><span>Last successful route</span><strong>${escapeHtml(opsymDiag.lastSuccessfulRoute||"—")}</strong></div>
+      <div><span>Navigation error</span><strong>${escapeHtml(opsymDiag.lastNavigationError||"None")}</strong></div>
+      <div><span>Navigation recovered at</span><strong>${escapeHtml(opsymDiag.navigationRecoveredAt||"—")}</strong></div>
     </div>
     <details class="diag-response">
       <summary>Last backend task response</summary>
@@ -2869,20 +2884,65 @@ function clearTransientUiForNavigation_(){
 function safeNavigate_(route,options={}){
   const r=routes[route]?route:"home";
   activeRoute=r;
+
+  if(typeof updateOpsymDiag_==="function"){
+    updateOpsymDiag_({
+      lastAttemptedRoute:r,
+      lastAttemptedRouteAt:new Date().toISOString(),
+      lastNavigationError:"",
+      lastNavigationStack:""
+    });
+  }
+
   clearTransientUiForNavigation_();
+
   try{
     const same=currentRoute()===r;
     render(r,!!options.replace || same);
+
+    if(typeof updateOpsymDiag_==="function"){
+      updateOpsymDiag_({
+        lastSuccessfulRoute:r,
+        lastSuccessfulRouteAt:new Date().toISOString()
+      });
+    }
   }catch(err){
+    const message=String(err?.message||err||"Unknown navigation error");
+    const stack=String(err?.stack||"");
+
+    if(typeof updateOpsymDiag_==="function"){
+      updateOpsymDiag_({
+        lastNavigationError:message,
+        lastNavigationStack:stack,
+        navigationRecoveredAt:new Date().toISOString()
+      });
+    }
+
     try{
+      activeRoute="home";
       const main=document.getElementById("appMain");
       if(main)main.innerHTML=home();
       setActiveNav("home");
       history.replaceState({route:"home"},"","#home");
       bindDynamic();
+
+      if(typeof updateOpsymDiag_==="function"){
+        updateOpsymDiag_({
+          lastSuccessfulRoute:"home",
+          lastSuccessfulRouteAt:new Date().toISOString()
+        });
+      }
+
       window.scrollTo(0,0);
       toast("Navigation recovered");
-    }catch(_){}
+    }catch(recoveryErr){
+      if(typeof updateOpsymDiag_==="function"){
+        updateOpsymDiag_({
+          lastNavigationError:message+" | Recovery error: "+String(recoveryErr?.message||recoveryErr),
+          lastNavigationStack:stack+"\nRECOVERY:\n"+String(recoveryErr?.stack||"")
+        });
+      }
+    }
   }
 }
 
