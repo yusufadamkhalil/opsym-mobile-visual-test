@@ -59,7 +59,7 @@ let liveTodayLoaded = false;
 let liveTodayError = null;
 
 
-const OPSYM_UI_VERSION="1.9.1-diagnostic.1";
+const OPSYM_UI_VERSION="1.9.1.2-route-state-fix";
 const OPSYM_NATIVE_WRAPPER_VERSION="1.9.0-native.2";
 const opsymDiag={
   uiVersion:OPSYM_UI_VERSION,
@@ -129,8 +129,10 @@ function escapeHtml(value){
     .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
 }
 
+let activeRoute=(location.hash.replace("#","")||"home");
+
 function currentRoute(){
-  return location.hash.replace("#","") || "home";
+  return activeRoute || "home";
 }
 
 function saveMobileBridgeConfig(endpoint,key=""){
@@ -1736,6 +1738,13 @@ async function createTaskFromForm(){
       if(!(result?.created || result?.status==="promoted_task")) throw new Error(result?.message||"The task was not verified as created.");
       confirmPendingTask_(requestId,result,{title,role,project,priority,date,time,location,isToday});
       pendingTaskRequests.delete(requestId);
+
+      // v1.9.1.2: direct acknowledgement is authoritative.
+      // If the user is visually on Tasks, re-render immediately from the
+      // in-memory confirmed object; do not wait for any later refresh.
+      if(currentRoute()==="tasks"){
+        render("tasks",true);
+      }
       recordOpsymPerf(fromInbox?"promote-inbox-task":"create-task",{clientMs:Math.round(performance.now()-clientT0),server:result.timings||null,directAck:true,reconciled:false});
       toast(result.timings?.totalMs?`Saved ${result.taskId||"task"} in ${(result.timings.totalMs/1000).toFixed(1)}s`:`Saved ${result.taskId||"task"}`);
       invalidateLiveViews("home","today","tasks",...(sourceInboxId?["inbox"]:[]));
@@ -1941,23 +1950,52 @@ function confirmPendingTask_(requestId,result,fallback={}){
     confirmPendingTaskAt:new Date().toISOString(),
     lastConfirmedTaskId:String(result?.taskId||"")
   });
-  if(!liveTasksData?.tasks)return;
+
+  if(!liveTasksData) liveTasksData={tasks:[]};
+  if(!Array.isArray(liveTasksData.tasks)) liveTasksData.tasks=[];
+
   const i=liveTasksData.tasks.findIndex(x=>x.pendingRequestId===requestId);
   const current=i>=0?liveTasksData.tasks[i]:null;
   const resolvedTaskId=String(result.taskId||current?.taskId||"").trim();
-  if(i<0 && resolvedTaskId && liveTasksData.tasks.some(t=>String(t.taskId||"").trim()===resolvedTaskId)){
-    if(currentRoute()==="tasks")render("tasks",true);
+
+  // If canonical Task is already loaded, just remove the stale provisional card.
+  const canonicalIndex=resolvedTaskId
+    ? liveTasksData.tasks.findIndex(t=>!t.pending && String(t.taskId||"").trim()===resolvedTaskId)
+    : -1;
+
+  if(canonicalIndex>=0){
+    if(i>=0 && i!==canonicalIndex) liveTasksData.tasks.splice(i,1);
+    pendingTaskRequests.delete(requestId);
+    if(currentRoute()==="tasks") render("tasks",true);
     return;
   }
+
   const technicalStatus=String(result.status||"").toLowerCase();
   const displayStatus=result.statusText || (
     ["created","promoted_task","pending"].includes(technicalStatus)
       ? ((result.scheduledDate||fallback.date)?"Scheduled":"Open")
       : (result.status||((fallback.date)?"Scheduled":"Open"))
   );
-  const confirmed={...(current||{}),pending:false,pendingRequestId:"",taskId:resolvedTaskId,title:result.title||fallback.title||current?.title||"Task",status:displayStatus,scheduledDate:result.scheduledDate||fallback.date||"",startTime:result.startTime||fallback.time||""};
-  if(i>=0)liveTasksData.tasks[i]=confirmed; else liveTasksData.tasks.unshift(confirmed);
-  if(currentRoute()==="tasks")render("tasks",true);
+
+  const confirmed={
+    ...(current||{}),
+    pending:false,
+    pendingRequestId:"",
+    taskId:resolvedTaskId,
+    objectUuid:result.objectUuid||current?.objectUuid||"",
+    title:result.title||fallback.title||current?.title||"Task",
+    status:displayStatus,
+    scheduledDate:result.scheduledDate||fallback.date||current?.scheduledDate||"",
+    startTime:result.startTime||fallback.time||current?.startTime||"",
+    sourceInboxId:result.sourceInboxId||current?.sourceInboxId||fallback.sourceInboxId||""
+  };
+
+  if(i>=0) liveTasksData.tasks[i]=confirmed;
+  else liveTasksData.tasks.unshift(confirmed);
+
+  pendingTaskRequests.delete(requestId);
+
+  if(currentRoute()==="tasks") render("tasks",true);
 }
 function markPendingTaskFailed_(requestId,message){
   if(!liveTasksData?.tasks)return;
@@ -2830,6 +2868,7 @@ function clearTransientUiForNavigation_(){
 
 function safeNavigate_(route,options={}){
   const r=routes[route]?route:"home";
+  activeRoute=r;
   clearTransientUiForNavigation_();
   try{
     const same=currentRoute()===r;
@@ -2855,7 +2894,19 @@ function setActiveNav(route){
     document.querySelector('.nav-item[data-route="more"]')?.classList.add("active");
   }
 }
-function render(route,replaceHash=false,options={}){
+function render(route,replaceHash=false){
+  route=routes[route]?route:"home";
+  activeRoute=route;
+
+  // The visual screen, application route and browser history must always agree.
+  if(replaceHash){
+    history.replaceState({route},"","#"+route);
+  }else if(location.hash!=="#"+route){
+    history.pushState({route},"","#"+route);
+  }else{
+    history.replaceState({route},"","#"+route);
+  }
+
   const fn=routes[route]||routes.home;
   const opts=options||{};
   const appMain=document.getElementById("appMain");
@@ -3087,7 +3138,7 @@ document.addEventListener("click",e=>{
   traceNav_("render-complete",{target:route,now:currentRoute()});
 },true);
 
-window.addEventListener("popstate",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
+window.addEventListener("popstate",()=>{activeRoute=location.hash.replace("#","")||"home";safeNavigate_(activeRoute,{replace:true});});
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
 
 if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1908",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
