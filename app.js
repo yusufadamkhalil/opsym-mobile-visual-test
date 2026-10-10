@@ -58,6 +58,32 @@ let liveTodayData = null;
 let liveTodayLoaded = false;
 let liveTodayError = null;
 
+
+const OPSYM_UI_VERSION="1.9.1-diagnostic.1";
+const OPSYM_NATIVE_WRAPPER_VERSION="1.9.0-native.2";
+const opsymDiag={
+  uiVersion:OPSYM_UI_VERSION,
+  nativeWrapperVersion:OPSYM_NATIVE_WRAPPER_VERSION,
+  bridgeVersion:"",
+  lastTaskRequestId:"",
+  lastTaskResponse:null,
+  lastTaskError:"",
+  confirmPendingTaskRan:false,
+  confirmPendingTaskAt:"",
+  lastConfirmedTaskId:"",
+  updatedAt:""
+};
+function updateOpsymDiag_(patch={}){
+  Object.assign(opsymDiag,patch,{updatedAt:new Date().toISOString()});
+  try{localStorage.setItem("opsym_diag_v1",JSON.stringify(opsymDiag));}catch(_){}
+}
+try{
+  const prior=JSON.parse(localStorage.getItem("opsym_diag_v1")||"null");
+  if(prior&&typeof prior==="object"){
+    Object.assign(opsymDiag,prior,{uiVersion:OPSYM_UI_VERSION,nativeWrapperVersion:OPSYM_NATIVE_WRAPPER_VERSION});
+  }
+}catch(_){}
+
 let liveTasksData = null;
 let liveTasksLoaded = false;
 let liveTasksError = null;
@@ -1609,6 +1635,14 @@ async function createTaskFromForm(){
   const semanticDraft=(captureEntryMode==="interpreted" && interpretedCaptureDraft) ? interpretedCaptureDraft : null;
   const fromInbox=!!semanticDraft?.sourceInboxId;
   const requestId=createClientRequestId();
+  updateOpsymDiag_({
+    lastTaskRequestId:requestId,
+    lastTaskResponse:null,
+    lastTaskError:"",
+    confirmPendingTaskRan:false,
+    confirmPendingTaskAt:"",
+    lastConfirmedTaskId:""
+  });
   const destination=captureEntryMode==="today"?"today":"tasks";
   const sourceInboxId=semanticDraft?.sourceInboxId||"";
   const isToday=!!date && date===new Date().toISOString().slice(0,10);
@@ -1683,7 +1717,8 @@ async function createTaskFromForm(){
       if(!payload || payload.ok!==true){
         throw new Error(payload?.error || "Task creation failed.");
       }
-      result=payload.data || {};
+      result=payload.data || {};      
+      updateOpsymDiag_({lastTaskResponse:result,lastTaskError:""});
 
       // The durable-write response is the authoritative Saved boundary.
       traceTaskAck_("direct-write-response",{
@@ -1705,7 +1740,8 @@ async function createTaskFromForm(){
       toast(result.timings?.totalMs?`Saved ${result.taskId||"task"} in ${(result.timings.totalMs/1000).toFixed(1)}s`:`Saved ${result.taskId||"task"}`);
       invalidateLiveViews("home","today","tasks",...(sourceInboxId?["inbox"]:[]));
       refreshInvalidatedViews({home:true,today:destination==="today",tasks:true,inbox:!!sourceInboxId});
-    }catch(err){
+     }catch(err){
+      updateOpsymDiag_({lastTaskError:String(err?.message||err)});
       // If canonical reconciliation already found the Task, the durable save succeeded.
       // Do not resurrect a false failure state because the acknowledgement path was slow.
       if(!hasPendingTaskRequest_(requestId)) return;
@@ -1900,6 +1936,11 @@ function removePendingTask_(requestId){
   if(currentRoute()==="tasks")render("tasks",true);
 }
 function confirmPendingTask_(requestId,result,fallback={}){
+  updateOpsymDiag_({
+    confirmPendingTaskRan:true,
+    confirmPendingTaskAt:new Date().toISOString(),
+    lastConfirmedTaskId:String(result?.taskId||"")
+  });
   if(!liveTasksData?.tasks)return;
   const i=liveTasksData.tasks.findIndex(x=>x.pendingRequestId===requestId);
   const current=i>=0?liveTasksData.tasks[i]:null;
@@ -2530,7 +2571,55 @@ async function showPwaDiagnostics(){
   ];
   await opsymNotice({title:"PWA & sharing diagnostics",message:lines.join("\n")});
 }
+
+async function refreshDiagnosticBridgeVersion_(){
+  if(!mobileBridge.endpoint){
+    updateOpsymDiag_({bridgeVersion:"Not configured"});
+    return;
+  }
+  try{
+    const p={action:"version",_ts:String(Date.now())};
+    if(mobileBridge.key)p.key=mobileBridge.key;
+    const payload=await jsonpRequest(mobileBridge.endpoint,p,8000,"Bridge version");
+    updateOpsymDiag_({bridgeVersion:String(payload?.data?.version||payload?.version||"Unknown")});
+  }catch(e){
+    updateOpsymDiag_({bridgeVersion:"Error: "+String(e?.message||e)});
+  }
+}
+function prettyDiagResponse_(){
+  if(!opsymDiag.lastTaskResponse)return "No task response recorded yet.";
+  try{return JSON.stringify(opsymDiag.lastTaskResponse,null,2);}catch(_){return String(opsymDiag.lastTaskResponse);}
+}
+function diagnosticsPanel_(){
+  return `
+  <section class="card opsym-diagnostic-card">
+    <div class="section-title">Diagnostics</div>
+    <div class="muted">Temporary diagnostic panel for the Task save-state issue.</div>
+    <div class="diag-grid">
+      <div><span>UI version</span><strong>${escapeHtml(opsymDiag.uiVersion||"")}</strong></div>
+      <div><span>Mobile Bridge</span><strong id="diagBridgeVersion">${escapeHtml(opsymDiag.bridgeVersion||"Checking...")}</strong></div>
+      <div><span>Native wrapper</span><strong>${escapeHtml(opsymDiag.nativeWrapperVersion||"")}</strong></div>
+      <div><span>Last request ID</span><strong>${escapeHtml(opsymDiag.lastTaskRequestId||"—")}</strong></div>
+      <div><span>confirmPendingTask()</span><strong>${opsymDiag.confirmPendingTaskRan?"YES":"NO"}</strong></div>
+      <div><span>Confirmed Task ID</span><strong>${escapeHtml(opsymDiag.lastConfirmedTaskId||"—")}</strong></div>
+      <div><span>Last task error</span><strong>${escapeHtml(opsymDiag.lastTaskError||"None")}</strong></div>
+    </div>
+    <details class="diag-response">
+      <summary>Last backend task response</summary>
+      <pre>${escapeHtml(prettyDiagResponse_())}</pre>
+    </details>
+    <div class="clarify-primary-actions">
+      <button class="ghost-btn" type="button" id="diagRefreshBtn">Refresh bridge version</button>
+      <button class="ghost-btn" type="button" id="diagCopyBtn">Copy diagnostics</button>
+    </div>
+  </section>`;
+}
+
 function settings(){
+  setTimeout(()=>refreshDiagnosticBridgeVersion_().then(()=>{
+    const el=document.getElementById("diagBridgeVersion");
+    if(el)el.textContent=opsymDiag.bridgeVersion||"Unknown";
+  }).catch(()=>{}),0);
   const row=(ic,title,sub,end)=>`<button class="setting-row" data-demo="${title}"><span class="row-icon">${icon(ic)}</span><span class="row-copy"><strong>${title}</strong><small>${sub}</small></span>${end}</button>`;
   const right=`<section class="section"><div class="settings-group">
     ${row("clock","Region & time","Africa/Nairobi · 24-hour clock",`<span class="setting-value">Kenya</span>`)}
@@ -2541,7 +2630,7 @@ function settings(){
     <button class="setting-row" type="button" data-pwa-diagnostics><span class="row-icon">${icon("monitor")}</span><span class="row-copy"><strong>PWA & sharing diagnostics</strong><small>Check standalone mode, service worker and share launch.</small></span><span class="setting-value">Check</span></button>
   </div></section>`;
   const left=intro("SETTINGS","Make Op-Sym work your way.","Preferences should support your workflow without becoming another task.");
-  return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
+  return `<section class="page">${isLandscape()?split(left,right):left+right}${diagnosticsPanel_()}</section>`;
 }
 function capture(){
   const taskMode=captureEntryMode==="task" || captureEntryMode==="today" || captureEntryMode==="interpreted";
@@ -2852,6 +2941,26 @@ document.addEventListener("click",e=>{
 });
 
 function bindDynamic(){
+  const diagRefresh=document.getElementById("diagRefreshBtn");
+  if(diagRefresh && !diagRefresh.dataset.bound){
+    diagRefresh.dataset.bound="1";
+    diagRefresh.addEventListener("click",async()=>{
+      diagRefresh.disabled=true;
+      diagRefresh.textContent="Checking...";
+      await refreshDiagnosticBridgeVersion_();
+      if(currentRoute()==="settings") safeNavigate_("settings",{replace:true});
+    });
+  }
+  const diagCopy=document.getElementById("diagCopyBtn");
+  if(diagCopy && !diagCopy.dataset.bound){
+    diagCopy.dataset.bound="1";
+    diagCopy.addEventListener("click",async()=>{
+      const txt=JSON.stringify(opsymDiag,null,2);
+      try{await navigator.clipboard.writeText(txt);toast("Diagnostics copied");}
+      catch(_){await opsymNotice({title:"Diagnostics",message:txt});}
+    });
+  }
+
   document.querySelectorAll("[data-demo]").forEach(el=>{
     el.addEventListener("click",()=>{
       const label=el.dataset.demo.replace(/-/g," ");
