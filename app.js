@@ -1425,16 +1425,18 @@ function openInboxClarifySheet(id){
             </div>
           </details>
         </section>
-      </div>
 
-      <footer class="clarify-sticky-actions" aria-label="Create from clarified item">
-        <div class="clarify-action-caption">What should this become?</div>
-        <div class="clarify-primary-actions">
-          <button class="ghost-btn clarify-final-btn" type="button" data-clarify-task="${escapeHtml(id)}">Create Task</button>
-          <button class="primary-btn clarify-final-btn" type="button" data-clarify-commitment="${escapeHtml(id)}">Create Commitment</button>
-        </div>
-        <button class="text-btn clarify-dismiss-btn" type="button" data-clarify-dismiss="${escapeHtml(id)}">Dismiss from Inbox</button>
-      </footer>
+        <footer class="clarify-scroll-actions" aria-label="Create from clarified item">
+          <div class="clarify-action-caption">What should this become?</div>
+          <div class="clarify-primary-actions">
+            <button class="ghost-btn clarify-final-btn" type="button" data-clarify-task="${escapeHtml(id)}">Create Task</button>
+            <button class="primary-btn clarify-final-btn" type="button" data-clarify-commitment="${escapeHtml(id)}">Create Commitment</button>
+          </div>
+          <button class="text-btn clarify-dismiss-btn" type="button" data-clarify-dismiss="${escapeHtml(id)}">Dismiss from Inbox</button>
+        </footer>
+
+        <div class="clarify-bottom-spacer" aria-hidden="true"></div>
+      </div>
     </section>`;
 
   document.body.appendChild(el);
@@ -1661,32 +1663,35 @@ async function createTaskFromForm(){
   // even if mutation acknowledgement or enrichment is still delayed.
   // Authoritative reconciliation: the backend mutation record is the primary
   // truth for whether an Inbox promotion has durably created a Task.
-  reconcilePendingTaskExact_(requestId,{
-    title,role,project,priority,date,time,location,isToday,sourceInboxId
-  }).catch(()=>false);
-
-  // Canonical Tasks-list lookup remains a secondary recovery path only.
-  reconcilePendingTaskFromCanonical_(requestId,{
-    title,date,time,sourceInboxId
-  }).catch(()=>false);
-
-  // Persist independently so Apps Script latency never traps the user on the form.
+  // Persist independently so the user leaves the form immediately.
+  // v1.9.1 no longer launches acknowledgement polling here: the direct write
+  // response below is itself authoritative.
   (async()=>{
     try{
       let result;
-      if(fromInbox){
-        const fields={...params};delete fields.action;delete fields.requestId;
-        result=await submitMutationAndWait("promote-inbox-task",fields,{requestId,timeoutMs:45000});
-      }else{
-        try{
-          const ack=await submitBridgePostWithAck(params,8000);
-          if(ack?.ok===false) throw new Error(ack.error||"Task creation failed.");
-          if(ack?.ok===true&&ack.data) result=ack.data;
-        }catch(ackErr){
-          if(!/acknowledgement not received/i.test(String(ackErr?.message||ackErr))) throw ackErr;
-          result=await waitForCreateRequestStatus(requestId,{timeoutMs:30000});
-        }
+
+      // v1.9.1 Direct Save Acknowledgement:
+      // the same request that performs the durable write returns the canonical
+      // Task result. No normal-path polling/reconciliation is required.
+      const directParams={...params,_ts:String(Date.now())};
+      const payload=await jsonpRequest(
+        mobileBridge.endpoint,
+        directParams,
+        45000,
+        fromInbox?"Task promotion":"Task creation"
+      );
+      if(!payload || payload.ok!==true){
+        throw new Error(payload?.error || "Task creation failed.");
       }
+      result=payload.data || {};
+
+      // The durable-write response is the authoritative Saved boundary.
+      traceTaskAck_("direct-write-response",{
+        requestId,
+        taskId:result?.taskId||"",
+        status:result?.status||"",
+        created:!!result?.created
+      });
       if(result?.status==="error") throw new Error(result.error||result.message||"Task creation failed.");
       if(result?.blocked){
         removePendingTask_(requestId);
@@ -1695,7 +1700,8 @@ async function createTaskFromForm(){
       }
       if(!(result?.created || result?.status==="promoted_task")) throw new Error(result?.message||"The task was not verified as created.");
       confirmPendingTask_(requestId,result,{title,role,project,priority,date,time,location,isToday});
-      recordOpsymPerf(fromInbox?"promote-inbox-task":"create-task",{clientMs:Math.round(performance.now()-clientT0),server:result.timings||null,directAck:!!result.directAck,reconciled:!!result.reconciled});
+      pendingTaskRequests.delete(requestId);
+      recordOpsymPerf(fromInbox?"promote-inbox-task":"create-task",{clientMs:Math.round(performance.now()-clientT0),server:result.timings||null,directAck:true,reconciled:false});
       toast(result.timings?.totalMs?`Saved ${result.taskId||"task"} in ${(result.timings.totalMs/1000).toFixed(1)}s`:`Saved ${result.taskId||"task"}`);
       invalidateLiveViews("home","today","tasks",...(sourceInboxId?["inbox"]:[]));
       refreshInvalidatedViews({home:true,today:destination==="today",tasks:true,inbox:!!sourceInboxId});
