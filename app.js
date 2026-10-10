@@ -1655,6 +1655,13 @@ async function createTaskFromForm(){
   toast("Task added - saving in the background");
   createTaskInFlight=false;
 
+  // v1.9.0.6: independently reconcile against the canonical Tasks endpoint.
+  // This clears the optimistic Saving state as soon as the durable Task row exists,
+  // even if mutation acknowledgement or enrichment is still delayed.
+  reconcilePendingTaskFromCanonical_(requestId,{
+    title,date,time,sourceInboxId
+  }).catch(()=>false);
+
   // Persist independently so Apps Script latency never traps the user on the form.
   (async()=>{
     try{
@@ -1685,6 +1692,9 @@ async function createTaskFromForm(){
       invalidateLiveViews("home","today","tasks",...(sourceInboxId?["inbox"]:[]));
       refreshInvalidatedViews({home:true,today:destination==="today",tasks:true,inbox:!!sourceInboxId});
     }catch(err){
+      // If canonical reconciliation already found the Task, the durable save succeeded.
+      // Do not resurrect a false failure state because the acknowledgement path was slow.
+      if(!hasPendingTaskRequest_(requestId)) return;
       markPendingTaskFailed_(requestId,err?.message||String(err));
       await opsymNotice({title:"Task still needs attention",message:`The task card has been marked as not confirmed.\n\nRequest ID: ${requestId}\n\n${err?.message||err}\n\nYou can retry after checking Tasks.`});
     }finally{
@@ -1693,6 +1703,59 @@ async function createTaskFromForm(){
     }
   })();
   return true;
+}
+
+
+function hasPendingTaskRequest_(requestId){
+  return !!(liveTasksData?.tasks||[]).some(t=>t.pendingRequestId===requestId);
+}
+function normalizedTaskMatchText_(v){
+  return String(v||"").toLowerCase().replace(/[^\p{L}\p{N}]+/gu," ").replace(/\s+/g," ").trim();
+}
+function findCanonicalTaskForPending_(tasks,expected={}){
+  const list=Array.isArray(tasks)?tasks:[];
+  const sourceInboxId=String(expected.sourceInboxId||"").trim();
+  if(sourceInboxId){
+    const byInbox=list.find(t=>String(t.sourceInboxId||"").trim()===sourceInboxId);
+    if(byInbox)return byInbox;
+  }
+  const title=normalizedTaskMatchText_(expected.title);
+  const date=String(expected.date||"").trim();
+  const time=String(expected.time||"").trim();
+  return list.find(t=>{
+    const sameTitle=title && normalizedTaskMatchText_(t.title)===title;
+    const sameDate=!date || String(t.scheduledDate||"").trim()===date;
+    const sameTime=!time || !String(t.startTime||"").trim() || String(t.startTime||"").trim()===time;
+    return sameTitle&&sameDate&&sameTime;
+  })||null;
+}
+async function reconcilePendingTaskFromCanonical_(requestId,expected={},options={}){
+  if(!mobileBridge.endpoint)return false;
+  const delays=Array.isArray(options.delays)?options.delays:[1200,1800,2500,3500,5000];
+  for(const delay of delays){
+    if(!hasPendingTaskRequest_(requestId))return true;
+    await new Promise(r=>setTimeout(r,delay));
+    if(!hasPendingTaskRequest_(requestId))return true;
+    try{
+      const params={action:"tasks"};
+      if(mobileBridge.key)params.key=mobileBridge.key;
+      const payload=await jsonpRequest(mobileBridge.endpoint,params,8000);
+      if(!payload||payload.ok!==true||!payload.data)continue;
+      const canonical=findCanonicalTaskForPending_(payload.data.tasks,expected);
+      if(!canonical)continue;
+
+      // Canonical durability is the success boundary. Replace the optimistic
+      // collection with server truth immediately; enrichment may continue.
+      liveTasksData=payload.data;
+      liveTasksLoaded=true;
+      liveTasksError=null;
+      pendingTaskRequests.delete(requestId);
+      if(currentRoute()==="tasks")render("tasks",true);
+      toast(`Saved ${canonical.taskId||"task"}`);
+      return true;
+    }catch(_){}
+  }
+  return false;
 }
 
 function removePendingTask_(requestId){
@@ -1711,7 +1774,12 @@ function confirmPendingTask_(requestId,result,fallback={}){
   if(!liveTasksData?.tasks)return;
   const i=liveTasksData.tasks.findIndex(x=>x.pendingRequestId===requestId);
   const current=i>=0?liveTasksData.tasks[i]:null;
-  const confirmed={...(current||{}),pending:false,pendingRequestId:"",taskId:result.taskId||current?.taskId||"",title:result.title||fallback.title||current?.title||"Task",status:result.status||((fallback.date)?"Scheduled":"Open"),scheduledDate:result.scheduledDate||fallback.date||"",startTime:result.startTime||fallback.time||""};
+  const resolvedTaskId=String(result.taskId||current?.taskId||"").trim();
+  if(i<0 && resolvedTaskId && liveTasksData.tasks.some(t=>String(t.taskId||"").trim()===resolvedTaskId)){
+    if(currentRoute()==="tasks")render("tasks",true);
+    return;
+  }
+  const confirmed={...(current||{}),pending:false,pendingRequestId:"",taskId:resolvedTaskId,title:result.title||fallback.title||current?.title||"Task",status:result.status||((fallback.date)?"Scheduled":"Open"),scheduledDate:result.scheduledDate||fallback.date||"",startTime:result.startTime||fallback.time||""};
   if(i>=0)liveTasksData.tasks[i]=confirmed; else liveTasksData.tasks.unshift(confirmed);
   if(currentRoute()==="tasks")render("tasks",true);
 }
@@ -2099,10 +2167,9 @@ function timelineRows(){
 }
 function pendingTaskState_(t){
   const age=Math.max(0,Date.now()-Number(t.pendingStartedAt||Date.now()));
-  if(age<5000)return {pill:"Saving…",detail:"Saving securely in the background…"};
-  if(age<15000)return {pill:"Still saving…",detail:"Op-Sym is still completing the secure write."};
-  if(age<30000)return {pill:"Taking longer…",detail:"This is taking longer than usual. Op-Sym is checking the result."};
-  return {pill:"Checking status…",detail:"Final verification is in progress."};
+  if(age<4000)return {pill:"Saving…",detail:"Writing the task securely…"};
+  if(age<10000)return {pill:"Confirming…",detail:"The task was sent. Op-Sym is confirming the saved record."};
+  return {pill:"Checking saved task…",detail:"Op-Sym is reconciling with the canonical Tasks list."};
 }
 
 function taskCards(){
