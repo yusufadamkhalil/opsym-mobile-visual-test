@@ -967,7 +967,7 @@ async function waitForCreateRequestStatus(requestId,{timeoutMs=30000}={}){
 }
 
 async function checkMutationStatus(requestId,timeoutMs=8000){
-  const params={action:"mutation-status",requestId};
+  const params={action:"mutation-status",requestId,_ts:String(Date.now())};
   if(mobileBridge.key) params.key=mobileBridge.key;
 
   const payload=await jsonpRequest(
@@ -1064,7 +1064,7 @@ async function testWriteGateway(){
 }
 
 async function checkCreateRequestStatus(requestId,timeoutMs=8000){
-  const params={action:"create-status",requestId};
+  const params={action:"create-status",requestId,_ts:String(Date.now())};
   if(mobileBridge.key) params.key=mobileBridge.key;
 
   const payload=await jsonpRequest(
@@ -1661,14 +1661,11 @@ async function createTaskFromForm(){
   // even if mutation acknowledgement or enrichment is still delayed.
   // Authoritative reconciliation: the backend mutation record is the primary
   // truth for whether an Inbox promotion has durably created a Task.
-  if(fromInbox){
-    reconcilePendingTaskFromMutationStatus_(requestId,{
-      title,role,project,priority,date,time,location,isToday
-    }).catch(()=>false);
-  }
+  reconcilePendingTaskExact_(requestId,{
+    title,role,project,priority,date,time,location,isToday,sourceInboxId
+  }).catch(()=>false);
 
-  // Canonical Tasks-list lookup remains a fallback for older deployments or
-  // situations where the mutation-status acknowledgement is delayed.
+  // Canonical Tasks-list lookup remains a secondary recovery path only.
   reconcilePendingTaskFromCanonical_(requestId,{
     title,date,time,sourceInboxId
   }).catch(()=>false);
@@ -1767,6 +1764,71 @@ function findCanonicalTaskForPending_(tasks,expected={}){
   })||null;
 }
 
+
+function traceTaskAck_(event,data={}){
+  try{
+    window.__opsymTaskAckTrace=window.__opsymTaskAckTrace||[];
+    window.__opsymTaskAckTrace.push({ts:new Date().toISOString(),event,...data});
+    if(window.__opsymTaskAckTrace.length>100)window.__opsymTaskAckTrace.shift();
+  }catch(_){}
+}
+
+async function reconcilePendingTaskExact_(requestId,fallback={}){
+  if(!mobileBridge.endpoint)return false;
+  const deadline=Date.now()+120000;
+  let attempt=0;
+  traceTaskAck_("watch-start",{requestId,sourceInboxId:fallback.sourceInboxId||"",title:fallback.title||""});
+
+  while(Date.now()<deadline){
+    if(!hasPendingTaskRequest_(requestId)){
+      traceTaskAck_("already-cleared",{requestId});
+      return true;
+    }
+
+    await new Promise(r=>setTimeout(r,attempt<4?600:1000));
+    attempt++;
+
+    // First check the exact durable Task create record.
+    try{
+      const created=await checkCreateRequestStatus(requestId,5000);
+      traceTaskAck_("create-status",{requestId,status:created?.status||"",taskId:created?.taskId||""});
+      if(created?.created===true || created?.status==="created"){
+        confirmPendingTask_(requestId,created,fallback);
+        pendingTaskRequests.delete(requestId);
+        traceTaskAck_("confirmed-create-record",{requestId,taskId:created.taskId||""});
+        toast(`Saved ${created.taskId||"task"}`);
+        invalidateLiveViews("home","today","tasks","inbox");
+        refreshInvalidatedViews({home:true,today:false,tasks:true,inbox:!!fallback.sourceInboxId});
+        return true;
+      }
+      if(created?.blocked===true || created?.status==="blocked") return false;
+    }catch(e){
+      traceTaskAck_("create-status-error",{requestId,message:String(e?.message||e)});
+    }
+
+    // Then check the promotion-level mutation record.
+    try{
+      const mutation=await checkMutationStatus(requestId,5000);
+      traceTaskAck_("mutation-status",{requestId,status:mutation?.status||"",taskId:mutation?.taskId||""});
+      if(mutation?.status==="promoted_task" && mutation?.taskId){
+        confirmPendingTask_(requestId,mutation,fallback);
+        pendingTaskRequests.delete(requestId);
+        traceTaskAck_("confirmed-mutation-record",{requestId,taskId:mutation.taskId||""});
+        toast(`Saved ${mutation.taskId}`);
+        invalidateLiveViews("home","today","tasks","inbox");
+        refreshInvalidatedViews({home:true,today:false,tasks:true,inbox:!!fallback.sourceInboxId});
+        return true;
+      }
+      if(mutation?.status==="blocked" || mutation?.status==="error") return false;
+    }catch(e){
+      traceTaskAck_("mutation-status-error",{requestId,message:String(e?.message||e)});
+    }
+  }
+
+  traceTaskAck_("watch-timeout",{requestId});
+  return false;
+}
+
 async function reconcilePendingTaskFromMutationStatus_(requestId,fallback={}){
   if(!mobileBridge.endpoint)return false;
   const deadline=Date.now()+120000;
@@ -1840,7 +1902,13 @@ function confirmPendingTask_(requestId,result,fallback={}){
     if(currentRoute()==="tasks")render("tasks",true);
     return;
   }
-  const confirmed={...(current||{}),pending:false,pendingRequestId:"",taskId:resolvedTaskId,title:result.title||fallback.title||current?.title||"Task",status:result.status||((fallback.date)?"Scheduled":"Open"),scheduledDate:result.scheduledDate||fallback.date||"",startTime:result.startTime||fallback.time||""};
+  const technicalStatus=String(result.status||"").toLowerCase();
+  const displayStatus=result.statusText || (
+    ["created","promoted_task","pending"].includes(technicalStatus)
+      ? ((result.scheduledDate||fallback.date)?"Scheduled":"Open")
+      : (result.status||((fallback.date)?"Scheduled":"Open"))
+  );
+  const confirmed={...(current||{}),pending:false,pendingRequestId:"",taskId:resolvedTaskId,title:result.title||fallback.title||current?.title||"Task",status:displayStatus,scheduledDate:result.scheduledDate||fallback.date||"",startTime:result.startTime||fallback.time||""};
   if(i>=0)liveTasksData.tasks[i]=confirmed; else liveTasksData.tasks.unshift(confirmed);
   if(currentRoute()==="tasks")render("tasks",true);
 }
@@ -2669,7 +2737,8 @@ function safeNavigate_(route,options={}){
   const r=routes[route]?route:"home";
   clearTransientUiForNavigation_();
   try{
-    render(r,!!options.replace);
+    const same=currentRoute()===r;
+    render(r,!!options.replace || same);
   }catch(err){
     try{
       const main=document.getElementById("appMain");
@@ -2777,31 +2846,6 @@ document.addEventListener("click",e=>{
 });
 
 function bindDynamic(){
-  document.querySelectorAll("[data-route]").forEach(el=>{
-    el.addEventListener("click",e=>{
-      const r=el.dataset.route;
-      if(!r)return;
-      e.preventDefault();
-
-      if(r==="task-detail"){
-        const id=String(el.dataset.taskId||"").trim();
-        if(id){
-          selectedTaskId=id;
-          activeTaskDetailTab="details";
-          liveTaskDetailData=null;
-          liveTaskDetailLoaded=false;
-          liveTaskDetailLoading=false;
-          liveTaskDetailError=null;
-        }
-      }
-
-      if(r==="capture"){
-        captureEntryMode=el.dataset.captureMode || "general";
-      }
-
-      safeNavigate_(r);
-    });
-  });
   document.querySelectorAll("[data-demo]").forEach(el=>{
     el.addEventListener("click",()=>{
       const label=el.dataset.demo.replace(/-/g," ");
@@ -2890,15 +2934,43 @@ function toast(msg){
   clearTimeout(window.__toastTimer);window.__toastTimer=setTimeout(()=>t.classList.remove("show"),1700);
 }
 
-document.addEventListener("pointerdown",e=>{
-  const el=e.target.closest?.(".brand,.top-actions [data-route],.bottom-nav [data-route]");
+function traceNav_(event,data={}){
+  try{
+    window.__opsymNavTrace=window.__opsymNavTrace||[];
+    window.__opsymNavTrace.push({ts:new Date().toISOString(),event,route:currentRoute(),...data});
+    if(window.__opsymNavTrace.length>120)window.__opsymNavTrace.shift();
+  }catch(_){}
+}
+
+document.addEventListener("click",e=>{
+  const el=e.target.closest?.("[data-route],.brand");
   if(!el)return;
-  const route=el.dataset.route || (el.classList.contains("brand")?"home":"");
+  const route=el.dataset?.route || (el.classList.contains("brand")?"home":"");
   if(!route)return;
+
+  // One and only one route handler. No pointerdown + click double navigation.
   e.preventDefault();
   e.stopImmediatePropagation();
+
+  if(route==="task-detail"){
+    const id=String(el.dataset.taskId||"").trim();
+    if(id){
+      selectedTaskId=id;
+      activeTaskDetailTab="details";
+      liveTaskDetailData=null;
+      liveTaskDetailLoaded=false;
+      liveTaskDetailLoading=false;
+      liveTaskDetailError=null;
+    }
+  }
+  if(route==="capture"){
+    captureEntryMode=el.dataset.captureMode || "general";
+  }
+
+  traceNav_("tap",{target:route,overlayCount:document.querySelectorAll(".smart-sheet-backdrop,.opsym-confirm-backdrop,.smart-reschedule-overlay,#inboxClarifyBackdrop").length});
   safeNavigate_(route);
-},{capture:true});
+  traceNav_("render-complete",{target:route,now:currentRoute()});
+},true);
 
 window.addEventListener("popstate",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
