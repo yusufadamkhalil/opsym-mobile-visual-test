@@ -59,7 +59,7 @@ let liveTodayLoaded = false;
 let liveTodayError = null;
 
 
-const OPSYM_UI_VERSION="1.9.2-minor-issues-consolidation";
+const OPSYM_UI_VERSION="1.9.3-prototype-activation";
 const OPSYM_NATIVE_WRAPPER_VERSION="1.9.0-native.2";
 const opsymDiag={
   uiVersion:OPSYM_UI_VERSION,
@@ -117,6 +117,279 @@ let activeOperationToken="";
 let activeOperationTimers=[];
 let clarifyReturnFocusEl=null;
 let localInterpreterReady = true;
+
+
+const OPSYM_PREFS_KEY="opsym_preferences_v193";
+const defaultOpsymPreferences={
+  locale:"en-KE",
+  timezone:"Africa/Nairobi",
+  timeFormat:"24",
+  workStart:"08:00",
+  workEnd:"17:00",
+  workDays:[1,2,3,4,5],
+  minGapMin:15,
+  defaultTaskMin:60,
+  quietHoursEnabled:true,
+  quietStart:"21:00",
+  quietEnd:"07:00",
+  foregroundNotifications:false,
+  ciceWaitingReview:true,
+  ciceClosurePrompts:true,
+  compactMode:false
+};
+let opsymPreferences=(()=>{
+  try{
+    return {...defaultOpsymPreferences,...JSON.parse(localStorage.getItem(OPSYM_PREFS_KEY)||"{}")};
+  }catch(_){return {...defaultOpsymPreferences};}
+})();
+
+function saveOpsymPreferences_(patch={}){
+  opsymPreferences={...opsymPreferences,...patch};
+  localStorage.setItem(OPSYM_PREFS_KEY,JSON.stringify(opsymPreferences));
+  return opsymPreferences;
+}
+function pad2_(n){return String(n).padStart(2,"0");}
+function ymdLocal_(d){
+  return `${d.getFullYear()}-${pad2_(d.getMonth()+1)}-${pad2_(d.getDate())}`;
+}
+function parseYmd_(value){
+  const m=String(value||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(!m)return null;
+  const d=new Date(Number(m[1]),Number(m[2])-1,Number(m[3]),12,0,0,0);
+  return Number.isNaN(d.getTime())?null:d;
+}
+function minutesFromTime_(value){
+  const m=String(value||"").match(/^(\d{1,2}):(\d{2})$/);
+  if(!m)return null;
+  return Math.max(0,Math.min(1439,Number(m[1])*60+Number(m[2])));
+}
+function timeFromMinutes_(mins){
+  const m=Math.max(0,Math.min(1439,Math.round(Number(mins)||0)));
+  return `${pad2_(Math.floor(m/60))}:${pad2_(m%60)}`;
+}
+function formatDayLabel_(d){
+  try{return new Intl.DateTimeFormat(opsymPreferences.locale||"en-KE",{weekday:"short"}).format(d);}
+  catch(_){return ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d.getDay()];}
+}
+function formatMonthLabel_(d,short=false){
+  try{return new Intl.DateTimeFormat(opsymPreferences.locale||"en-KE",{month:short?"short":"long",year:"numeric"}).format(d);}
+  catch(_){return `${d.getMonth()+1}/${d.getFullYear()}`;}
+}
+function liveTaskArray_(){
+  return Array.isArray(liveTasksData?.tasks) ? liveTasksData.tasks : [];
+}
+function liveCommitmentArray_(){
+  return Array.isArray(liveCommitmentsData?.items) ? liveCommitmentsData.items : [];
+}
+function commitmentDueDate_(c){
+  const raw=c?.dueDateIso||c?.dueDate||c?.reviewDate||"";
+  const iso=String(raw).match(/\d{4}-\d{2}-\d{2}/)?.[0]||"";
+  return parseYmd_(iso);
+}
+function taskDate_(t){return parseYmd_(t?.scheduledDate||"");}
+function tasksForDate_(date){
+  const key=ymdLocal_(date);
+  return liveTaskArray_().filter(t=>String(t.scheduledDate||"")===key);
+}
+function commitmentsForDate_(date){
+  const key=ymdLocal_(date);
+  return liveCommitmentArray_().filter(c=>{
+    const d=commitmentDueDate_(c);
+    return d && ymdLocal_(d)===key;
+  });
+}
+function countObjectsForDate_(date){
+  return tasksForDate_(date).length+commitmentsForDate_(date).length;
+}
+function ensurePlanningData_(){
+  const promises=[];
+  if(mobileBridge.endpoint && !liveTasksLoaded)promises.push(loadLiveTasksData(false));
+  if(mobileBridge.endpoint && !liveCommitmentsLoaded)promises.push(loadLiveCommitmentsData(false));
+  if(mobileBridge.endpoint && !liveTodayLoaded)promises.push(loadLiveTodayData(false));
+  return Promise.allSettled(promises);
+}
+function todayFreeWindows_(){
+  const start=minutesFromTime_(opsymPreferences.workStart)||480;
+  const end=minutesFromTime_(opsymPreferences.workEnd)||1020;
+  const gap=Math.max(0,Number(opsymPreferences.minGapMin)||0);
+  const items=(liveTodayData?.items||[]).map(x=>{
+    const a=minutesFromTime_(x.time);
+    const b=minutesFromTime_(x.end);
+    if(a==null)return null;
+    return {start:a,end:b!=null&&b>a?b:a+(Number(opsymPreferences.defaultTaskMin)||60)};
+  }).filter(Boolean).sort((a,b)=>a.start-b.start);
+  const occupied=[];
+  items.forEach(x=>{
+    const st=Math.max(start,x.start-gap), en=Math.min(end,x.end+gap);
+    if(en<=start||st>=end)return;
+    const prev=occupied[occupied.length-1];
+    if(prev && st<=prev.end)prev.end=Math.max(prev.end,en);
+    else occupied.push({start:st,end:en});
+  });
+  const free=[];
+  let cursor=start;
+  occupied.forEach(x=>{
+    if(x.start>cursor)free.push({start:cursor,end:x.start});
+    cursor=Math.max(cursor,x.end);
+  });
+  if(cursor<end)free.push({start:cursor,end});
+  return free.filter(x=>x.end-x.start>=30);
+}
+function planningPressureForDate_(date){
+  const tasks=tasksForDate_(date);
+  const commitments=commitmentsForDate_(date);
+  const clash=tasks.filter(t=>t.hasClash).length;
+  return {tasks:tasks.length,commitments:commitments.length,total:tasks.length+commitments.length,clash};
+}
+function weekDates_(base=new Date()){
+  const d=new Date(base.getFullYear(),base.getMonth(),base.getDate(),12);
+  const monday=new Date(d);
+  const offset=(d.getDay()+6)%7;
+  monday.setDate(d.getDate()-offset);
+  return Array.from({length:7},(_,i)=>{const x=new Date(monday);x.setDate(monday.getDate()+i);return x;});
+}
+function monthWeeks_(base=new Date()){
+  const first=new Date(base.getFullYear(),base.getMonth(),1,12);
+  const last=new Date(base.getFullYear(),base.getMonth()+1,0,12);
+  const weeks=[];
+  let cursor=new Date(first);
+  while(cursor<=last){
+    const weekNo=Math.floor((cursor.getDate()-1)/7)+1;
+    const end=new Date(base.getFullYear(),base.getMonth(),Math.min(last.getDate(),cursor.getDate()+6),12);
+    const tasks=liveTaskArray_().filter(t=>{
+      const d=taskDate_(t); return d && d>=cursor && d<=end;
+    });
+    const commitments=liveCommitmentArray_().filter(c=>{
+      const d=commitmentDueDate_(c); return d && d>=cursor && d<=end;
+    });
+    const all=[...tasks.map(t=>({title:t.title,date:taskDate_(t)})),...commitments.map(c=>({title:c.title||c.personName||c.type||"Commitment",date:commitmentDueDate_(c)}))]
+      .sort((a,b)=>a.date-b.date);
+    weeks.push({weekNo,start:new Date(cursor),end,items:all,count:all.length});
+    cursor=new Date(end);cursor.setDate(end.getDate()+1);
+  }
+  return weeks;
+}
+function yearMonthStats_(year=new Date().getFullYear()){
+  return Array.from({length:12},(_,m)=>{
+    const tasks=liveTaskArray_().filter(t=>{const d=taskDate_(t);return d&&d.getFullYear()===year&&d.getMonth()===m;});
+    const commitments=liveCommitmentArray_().filter(c=>{const d=commitmentDueDate_(c);return d&&d.getFullYear()===year&&d.getMonth()===m;});
+    return {month:m,count:tasks.length+commitments.length,clashes:tasks.filter(t=>t.hasClash).length};
+  });
+}
+function plannerSheet_(title,subtitle,bodyHtml){
+  document.querySelector("#opsymPlannerBackdrop")?.remove();
+  const el=document.createElement("div");
+  el.id="opsymPlannerBackdrop";
+  el.className="smart-sheet-backdrop";
+  el.innerHTML=`<section class="smart-sheet opsym-planner-sheet" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}" tabindex="-1">
+    <div class="smart-sheet-handle"></div>
+    <div class="smart-sheet-head"><div><span class="kicker">OP-SYM PLANNER</span><h2>${escapeHtml(title)}</h2><p>${escapeHtml(subtitle)}</p></div><button class="icon-close" type="button" data-close-planner aria-label="Close">×</button></div>
+    <div class="opsym-planner-content">${bodyHtml}</div>
+    <div class="clarify-bottom-spacer"></div>
+  </section>`;
+  document.body.appendChild(el);
+  document.body.classList.add("opsym-modal-open");
+  el.querySelector("[data-close-planner]")?.addEventListener("click",()=>{el.remove();document.body.classList.remove("opsym-modal-open");});
+  el.addEventListener("click",e=>{if(e.target===el){el.remove();document.body.classList.remove("opsym-modal-open");}});
+  setTimeout(()=>el.querySelector(".smart-sheet")?.focus(),0);
+}
+async function showFindTime_(){
+  await ensurePlanningData_();
+  const windows=todayFreeWindows_();
+  const unscheduled=liveTaskArray_().filter(t=>t.isUnscheduled).slice(0,5);
+  const rows=windows.length?windows.map(w=>`<button class="opsym-slot-card" type="button" data-slot-time="${timeFromMinutes_(w.start)}">
+    <strong>${timeFromMinutes_(w.start)}-${timeFromMinutes_(w.end)}</strong>
+    <span>${w.end-w.start} min available</span>
+  </button>`).join(""):`<div class="empty-card"><strong>No 30-minute window found</strong><small>Adjust working hours or gap rules in Settings.</small></div>`;
+  const pending=unscheduled.length?`<div class="detail-note"><span>Unscheduled work</span><p>${unscheduled.map(t=>escapeHtml(t.title)).join(" · ")}</p></div>`:"";
+  plannerSheet_("Find time","Available windows are calculated from today's live schedule and your working-hour preferences.",`<div class="opsym-slot-grid">${rows}</div>${pending}`);
+}
+async function showWeekPlanner_(){
+  await ensurePlanningData_();
+  const dates=weekDates_();
+  const pressure=dates.map(d=>({date:d,...planningPressureForDate_(d)}));
+  const unscheduled=liveTaskArray_().filter(t=>t.isUnscheduled);
+  const highest=pressure.slice().sort((a,b)=>(b.total+b.clash*2)-(a.total+a.clash*2))[0];
+  const light=pressure.slice().sort((a,b)=>(a.total+a.clash*2)-(b.total+b.clash*2))[0];
+  const rows=pressure.map(p=>`<div class="opsym-plan-row ${p.clash?"warn":""}"><strong>${escapeHtml(formatDayLabel_(p.date))} ${p.date.getDate()}</strong><span>${p.total} scheduled ${p.clash?`· ${p.clash} clash${p.clash===1?"":"es"}`:""}</span></div>`).join("");
+  const suggestions=[
+    highest?`${formatDayLabel_(highest.date)} is the highest-pressure day with ${highest.total} scheduled object${highest.total===1?"":"s"}${highest.clash?` and ${highest.clash} clash${highest.clash===1?"":"es"}`:""}.`:"",
+    light?`${formatDayLabel_(light.date)} is currently the lightest day with ${light.total} scheduled object${light.total===1?"":"s"}.`:"",
+    unscheduled.length?`${unscheduled.length} open task${unscheduled.length===1?" is":"s are"} still unscheduled.`:"No open unscheduled tasks."
+  ].filter(Boolean);
+  plannerSheet_("Plan my week","This is generated from your live Tasks and Commitments.",`${rows}<div class="detail-note"><span>Planner recommendations</span><p>${escapeHtml(suggestions.join(" "))}</p></div><div class="form-actions"><button class="primary-btn" type="button" data-planner-open-tasks>Review tasks</button></div>`);
+}
+async function refreshAnalytics_(){
+  if(!mobileBridge.endpoint){toast("Connect the Mobile Bridge first");return;}
+  toast("Refreshing live insights…");
+  await Promise.allSettled([loadLiveTasksData(false),loadLiveTodayData(false),loadLiveCommitmentsData(true),loadLiveHomeData(false)]);
+  if(currentRoute()==="analytics")render("analytics",true,{suppressRefresh:true});
+  toast("Insights refreshed");
+}
+function showTaskMore_(taskId){
+  const t=(liveTaskDetailData?.task)||liveTaskArray_().find(x=>x.taskId===taskId)||{};
+  const sourceUrl=String(t.sourceUrl||"").trim();
+  plannerSheet_("Task actions",t.title||taskId,`
+    <div class="opsym-action-menu">
+      <button type="button" data-copy-task-title="${escapeHtml(t.title||"")}"><strong>Copy task title</strong><span>Copy the task title to the clipboard.</span></button>
+      ${sourceUrl?`<button type="button" data-open-task-source="${escapeHtml(sourceUrl)}"><strong>Open source</strong><span>Open the original source link.</span></button>`:""}
+      <button type="button" data-task-provenance="${escapeHtml(taskId)}"><strong>View provenance</strong><span>Show Signal and Inbox traceability.</span></button>
+    </div>`);
+}
+async function showRegionTimeSettings_(){
+  const timezone=await opsymPrompt({title:"Timezone",message:"Enter an IANA timezone, for example Africa/Nairobi.",value:opsymPreferences.timezone,confirmLabel:"Next"});
+  if(timezone===null)return;
+  const format=await opsymPrompt({title:"Time format",message:"Enter 24 for 24-hour time or 12 for 12-hour time.",value:opsymPreferences.timeFormat,confirmLabel:"Save"});
+  if(format===null)return;
+  saveOpsymPreferences_({timezone:String(timezone).trim()||"Africa/Nairobi",timeFormat:String(format).trim()==="12"?"12":"24"});
+  toast("Region & time saved");
+  render("settings",true);
+}
+async function showSchedulingSettings_(){
+  const start=await opsymPrompt({title:"Working day starts",message:"Use HH:MM, for example 08:00.",value:opsymPreferences.workStart,confirmLabel:"Next"});
+  if(start===null)return;
+  const end=await opsymPrompt({title:"Working day ends",message:"Use HH:MM, for example 17:00.",value:opsymPreferences.workEnd,confirmLabel:"Next"});
+  if(end===null)return;
+  const gap=await opsymPrompt({title:"Minimum gap",message:"Minutes to protect between scheduled items.",value:String(opsymPreferences.minGapMin),confirmLabel:"Save"});
+  if(gap===null)return;
+  if(minutesFromTime_(start)==null||minutesFromTime_(end)==null||minutesFromTime_(start)>=minutesFromTime_(end)){
+    await opsymNotice({title:"Check working hours",message:"Start and end must be valid HH:MM times and the end must be later than the start."});return;
+  }
+  saveOpsymPreferences_({workStart:start,workEnd:end,minGapMin:Math.max(0,Number(gap)||0)});
+  toast("Scheduling preferences saved");
+  render("settings",true);
+}
+async function showNotificationSettings_(){
+  const enabled=!opsymPreferences.foregroundNotifications;
+  if(enabled && "Notification" in window && Notification.permission==="default"){
+    try{await Notification.requestPermission();}catch(_){}
+  }
+  const supported="Notification" in window;
+  const permitted=supported && Notification.permission==="granted";
+  saveOpsymPreferences_({foregroundNotifications:enabled&&permitted});
+  await opsymNotice({
+    title:"Notifications",
+    message:permitted
+      ? `Foreground browser notifications are now ${enabled?"enabled":"disabled"}. Quiet hours remain ${opsymPreferences.quietHoursEnabled?`${opsymPreferences.quietStart}-${opsymPreferences.quietEnd}`:"off"}. Background Android reminders still require the native notification layer.`
+      : "Browser notification permission is not available/granted. Op-Sym will not pretend notifications are active. Background Android reminders require a later native-wrapper notification integration."
+  });
+  render("settings",true);
+}
+async function showCiceSettings_(){
+  const next=!opsymPreferences.ciceWaitingReview;
+  saveOpsymPreferences_({ciceWaitingReview:next,ciceClosurePrompts:next});
+  toast(`CICE review prompts ${next?"enabled":"disabled"}`);
+  render("settings",true);
+}
+function showInterfaceSettings_(){
+  const next=!opsymPreferences.compactMode;
+  saveOpsymPreferences_({compactMode:next});
+  document.body.classList.toggle("opsym-compact",next);
+  toast(`Compact interface ${next?"enabled":"disabled"}`);
+  render("settings",true);
+}
+
+document.body?.classList.toggle("opsym-compact",!!opsymPreferences.compactMode);
 
 const mobileBridge = {
   endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
@@ -2565,7 +2838,7 @@ function today(){
     `<button class="primary-btn" data-route="capture" data-capture-mode="today">Add to today</button>`,
     "blue"
   );
-  const right=`<section class="section"><div class="section-head"><div><span class="kicker">${dayLabel}</span><h2>Today's plan</h2><p>${summary}</p></div><button class="ghost-btn" data-demo="find-time">Find time</button></div><div class="timeline">${timelineRows()}</div></section>`;
+  const right=`<section class="section"><div class="section-head"><div><span class="kicker">${dayLabel}</span><h2>Today's plan</h2><p>${summary}</p></div><button class="ghost-btn" data-find-time>Find time</button></div><div class="timeline">${timelineRows()}</div></section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function tasks(){
@@ -2599,38 +2872,67 @@ function inbox(){
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function week(){
-  const left=intro("WEEK","Shape the week before it shapes you.","Protect important work and see pressure before it becomes a clash.",`<button class="primary-btn" data-demo="plan-week">Plan my week</button>`);
-  const days=[["Mon","5","3"],["Tue","6","5"],["Wed","7","4"],["Thu","8","6"],["Fri","9","3"],["Sat","10","1"],["Sun","11","0"]];
-  const strip=days.map((d,i)=>`<div class="day ${i===2?"today":""}"><b>${d[0]}</b><span>${d[1]} Oct</span><em>${d[2]} items</em></div>`).join("");
-  const right=`<section class="section"><div class="section-head"><div><span class="kicker">NEXT 7 DAYS</span><h2>Weekly plan</h2><p>Wednesday is your pressure point.</p></div></div><div class="week-strip">${strip}</div><div class="list" style="margin-top:14px">${actionRow("alert","Wednesday needs attention","Two clinical commitments overlap with research work.",true,"today")}${actionRow("calendar","Friday has protected focus time","14:00-16:00 is currently clear.",false,"today")}</div></section>`;
+  if(mobileBridge.endpoint && (!liveTasksLoaded || !liveCommitmentsLoaded)){
+    setTimeout(()=>ensurePlanningData_().then(()=>{if(currentRoute()==="week")render("week",true)}),0);
+  }
+  const dates=weekDates_();
+  const todayKey=ymdLocal_(new Date());
+  const stats=dates.map(d=>({date:d,...planningPressureForDate_(d)}));
+  const strip=stats.map(x=>`<button class="day ${ymdLocal_(x.date)===todayKey?"today":""}" type="button" data-week-day="${ymdLocal_(x.date)}"><b>${escapeHtml(formatDayLabel_(x.date))}</b><span>${x.date.getDate()} ${escapeHtml(formatMonthLabel_(x.date,true).split(" ")[0])}</span><em>${x.total} item${x.total===1?"":"s"}${x.clash?` · ${x.clash} clash`:""}</em></button>`).join("");
+  const highest=stats.slice().sort((a,b)=>(b.total+b.clash*2)-(a.total+a.clash*2))[0];
+  const light=stats.slice().sort((a,b)=>(a.total+a.clash*2)-(b.total+b.clash*2))[0];
+  const summary=highest?`${formatDayLabel_(highest.date)} currently has the most planning pressure.`:"No scheduled work is loaded yet.";
+  const left=intro("WEEK","Shape the week before it shapes you.","Protect important work and see pressure before it becomes a clash.",`<button class="primary-btn" data-plan-week>Plan my week</button>`);
+  const right=`<section class="section"><div class="section-head"><div><span class="kicker">THIS WEEK</span><h2>Weekly plan</h2><p>${escapeHtml(summary)}</p></div></div><div class="week-strip">${strip}</div><div class="list" style="margin-top:14px">
+    ${highest?actionRow("alert",`${formatDayLabel_(highest.date)} needs the most attention`,`${highest.total} scheduled objects${highest.clash?` · ${highest.clash} active clash${highest.clash===1?"":"es"}`:""}.`,!!highest.clash,"tasks"):""}
+    ${light?actionRow("calendar",`${formatDayLabel_(light.date)} is currently lightest`,`${light.total} scheduled object${light.total===1?"":"s"}.`,false,"tasks"):""}
+  </div></section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function month(){
-  const left=intro("MONTH","Keep the month in perspective.","Major commitments, deadlines and workload without spreadsheet thinking.");
-  const weeks=[
-    ["Week 1","7 activities",["Ward round · 2 Oct","KROS review · 4 Oct"]],
-    ["Week 2","11 activities",["Research supervision · 8 Oct","Aster clinic · 9 Oct"]],
-    ["Week 3","8 activities",["Proposal review · 15 Oct","Management meeting · 16 Oct"]],
-    ["Week 4","13 activities",["Major deadline · 24 Oct","Theatre list · 27 Oct"]],
-  ];
-  const cards=weeks.map(w=>`<article class="week-block"><div class="section-head"><div><h3>${w[0]}</h3><p>${w[1]}</p></div></div>${w[2].map(r=>{let [a,b]=r.split(" · ");return `<div class="mini-row"><span>${a}</span><small>${b}</small></div>`}).join("")}</article>`).join("");
-  const right=`<section class="section"><div class="section-head"><div><span class="kicker">OCTOBER 2026</span><h2>Weeks</h2></div></div><div class="card-grid">${cards}</div></section>`;
+  if(mobileBridge.endpoint && (!liveTasksLoaded || !liveCommitmentsLoaded)){
+    setTimeout(()=>ensurePlanningData_().then(()=>{if(currentRoute()==="month")render("month",true)}),0);
+  }
+  const now=new Date();
+  const weeks=monthWeeks_(now);
+  const left=intro("MONTH","Keep the month in perspective.","Major commitments, deadlines and workload generated from live Op-Sym records.");
+  const cards=weeks.map(w=>`<article class="week-block"><div class="section-head"><div><h3>Week ${w.weekNo}</h3><p>${w.count} activit${w.count===1?"y":"ies"}</p></div></div>${w.items.slice(0,4).map(r=>`<div class="mini-row"><span>${escapeHtml(r.title)}</span><small>${r.date?`${r.date.getDate()} ${escapeHtml(formatMonthLabel_(r.date,true).split(" ")[0])}`:""}</small></div>`).join("") || `<div class="mini-row"><span>No scheduled items</span><small>Clear</small></div>`}</article>`).join("");
+  const right=`<section class="section"><div class="section-head"><div><span class="kicker">${escapeHtml(formatMonthLabel_(now).toUpperCase())}</span><h2>Weeks</h2></div></div><div class="card-grid">${cards}</div></section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function year(){
-  const left=intro("YEAR","Keep direction visible.","See milestones and recurring work that matter across the year.");
-  const months=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  const cards=months.map((m,i)=>`<article class="month-card ${i===9?"current":""}"><small>${m.toUpperCase()}</small><strong>${i===9?"13":"4"} items</strong><span>${i===9?"3 major milestones":"Steady workload"}</span></article>`).join("");
-  const right=`<section class="section"><div class="section-head"><div><span class="kicker">2026</span><h2>Year at a glance</h2></div></div><div class="month-grid">${cards}</div></section>`;
+  if(mobileBridge.endpoint && (!liveTasksLoaded || !liveCommitmentsLoaded)){
+    setTimeout(()=>ensurePlanningData_().then(()=>{if(currentRoute()==="year")render("year",true)}),0);
+  }
+  const now=new Date(), year=now.getFullYear(), stats=yearMonthStats_(year);
+  const left=intro("YEAR","Keep direction visible.","See milestones and workload across the year from your live Op-Sym records.");
+  const cards=stats.map(x=>{
+    const d=new Date(year,x.month,1);
+    const current=x.month===now.getMonth();
+    return `<article class="month-card ${current?"current":""}"><small>${escapeHtml(formatMonthLabel_(d,true).split(" ")[0].toUpperCase())}</small><strong>${x.count} item${x.count===1?"":"s"}</strong><span>${x.clashes?`${x.clashes} clash${x.clashes===1?"":"es"}`:x.count?"Scheduled work":"No scheduled work"}</span></article>`;
+  }).join("");
+  const right=`<section class="section"><div class="section-head"><div><span class="kicker">${year}</span><h2>Year at a glance</h2></div></div><div class="month-grid">${cards}</div></section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
 function commitments(){const classes=["ALL","DO","MEET","WAIT","DELEGATE","DECIDE"],left=intro("COMMITMENTS","Close the loops.","Review open loops by CICE class.",`<button class="primary-btn" data-route="capture" data-capture-mode="commitment">Capture commitment</button>`,"champagne"),right=`<section class="section"><div class="section-head"><div><span class="kicker">CICE CLASSES</span><h2>Commitments</h2><p>DO · MEET · WAIT · DELEGATE · DECIDE</p></div></div><div class="commitment-filter-strip">${classes.map(c=>`<button type="button" class="commitment-filter ${activeCommitmentFilter===c?"active":""}" data-commitment-filter="${c}">${c}</button>`).join("")}</div><div class="list">${commitmentRows()}</div></section>`;return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;}
 function analytics(){
-  const left=intro("ANALYTICS","See the pattern, not just the list.","Useful planning signals only. No decorative dashboard noise.",`<button class="secondary-btn" data-demo="refresh">Refresh insights</button>`);
+  if(mobileBridge.endpoint && (!liveTasksLoaded || !liveCommitmentsLoaded)){
+    setTimeout(()=>ensurePlanningData_().then(()=>{if(currentRoute()==="analytics")render("analytics",true,{suppressRefresh:true})}),0);
+  }
+  const tasks=liveTaskArray_();
+  const commitments=liveCommitmentArray_();
+  const clashes=tasks.filter(t=>t.hasClash).length;
+  const unscheduled=tasks.filter(t=>t.isUnscheduled).length;
+  const today=tasks.filter(t=>t.isToday).length;
+  const waiting=commitments.filter(c=>String(c.type||c.commitmentType||"").toUpperCase()==="WAIT").length;
+  const next7=weekDates_().map(d=>planningPressureForDate_(d));
+  const pressure=next7.slice().sort((a,b)=>(b.total+b.clash*2)-(a.total+a.clash*2))[0];
+  const max=Math.max(1,tasks.length);
+  const left=intro("ANALYTICS","See the pattern, not just the list.","Live planning signals calculated from current Op-Sym data.",`<button class="secondary-btn" data-refresh-insights>Refresh insights</button>`);
   const right=`<section class="section"><div class="card-grid">
-    <article class="insight"><span class="kicker">SCHEDULE PRESSURE</span><div class="number-row"><strong>2</strong><span>active clashes</span></div><p>Most pressure is clustered around Wednesday afternoon.</p><div class="bar"><span style="width:62%"></span></div></article>
-    <article class="insight"><span class="kicker">UNSCHEDULED WORK</span><div class="number-row"><strong>3</strong><span>tasks</span></div><p>Two can be placed into currently protected focus windows.</p><div class="bar"><span style="width:38%"></span></div></article>
-    <article class="insight"><h3>Useful pattern</h3><p>Clinical work is consistently concentrated in the morning. Your strongest uninterrupted innovation window remains 14:00-16:00 on Fridays.</p></article>
+    <article class="insight"><span class="kicker">SCHEDULE PRESSURE</span><div class="number-row"><strong>${clashes}</strong><span>active clash${clashes===1?"":"es"}</span></div><p>${pressure?`${escapeHtml(formatDayLabel_(pressure.date))} has the highest next-seven-day load (${pressure.total} scheduled).`:"No scheduled pressure detected."}</p><div class="bar"><span style="width:${Math.min(100,Math.round(clashes/max*100))}%"></span></div></article>
+    <article class="insight"><span class="kicker">UNSCHEDULED WORK</span><div class="number-row"><strong>${unscheduled}</strong><span>task${unscheduled===1?"":"s"}</span></div><p>${today} open task${today===1?" is":"s are"} scheduled today.</p><div class="bar"><span style="width:${Math.min(100,Math.round(unscheduled/max*100))}%"></span></div></article>
+    <article class="insight"><span class="kicker">WAITING-FOR</span><div class="number-row"><strong>${waiting}</strong><span>open WAIT commitment${waiting===1?"":"s"}</span></div><p>${commitments.length} open commitment${commitments.length===1?" is":"s are"} currently visible to CICE.</p></article>
   </div></section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
@@ -2711,6 +3013,7 @@ function diagnosticsPanel_(){
     </details>
     <div class="clarify-primary-actions">
       <button class="ghost-btn" type="button" id="diagCopyBtn">Copy diagnostics</button>
+      <button class="ghost-btn" type="button" data-pwa-diagnostics>Run PWA/share diagnostics</button>
     </div>
   </details>`;
 }
@@ -2748,14 +3051,13 @@ function settings(){
     if(el)el.textContent=opsymDiag.bridgeVersion||"Unknown";
   }).catch(()=>{}),0);
 
-  const row=(ic,title,sub,end)=>`<button class="setting-row" data-demo="${title}"><span class="row-icon">${icon(ic)}</span><span class="row-copy"><strong>${title}</strong><small>${sub}</small></span>${end}</button>`;
+  const row=(ic,title,sub,end,action)=>`<button class="setting-row" type="button" ${action?`data-settings-action="${action}"`:""}><span class="row-icon">${icon(ic)}</span><span class="row-copy"><strong>${title}</strong><small>${sub}</small></span>${end}</button>`;
   const right=`<section class="section"><div class="settings-group">
-    ${row("clock","Region & time","Africa/Nairobi · 24-hour clock",`<span class="setting-value">Kenya</span>`)}
-    ${row("calendar","Scheduling","Working days, gap rules and buffers",`<span class="setting-value">Edit</span>`)}
-    ${row("alert","Notifications","Quiet hours and reminders",`<span class="toggle on"></span>`)}
-    ${row("target","CICE","Closure and waiting-for intelligence",`<span class="toggle on"></span>`)}
-    ${row("monitor","Interface","Responsive mobile interface",`<span class="setting-value">Mobile</span>`)}
-    <button class="setting-row" type="button" data-pwa-diagnostics><span class="row-icon">${icon("monitor")}</span><span class="row-copy"><strong>PWA & sharing diagnostics</strong><small>Check standalone mode, service worker and share launch.</small></span><span class="setting-value">Check</span></button>
+    ${row("clock","Region & time",`${escapeHtml(opsymPreferences.timezone)} · ${escapeHtml(opsymPreferences.timeFormat)}-hour clock`, `<span class="setting-value">${escapeHtml(opsymPreferences.locale)}</span>`,"region-time")}
+    ${row("calendar","Scheduling",`${escapeHtml(opsymPreferences.workStart)}-${escapeHtml(opsymPreferences.workEnd)} · ${opsymPreferences.minGapMin} min gap`, `<span class="setting-value">Edit</span>`,"scheduling")}
+    ${row("alert","Notifications","Foreground alerts and notification readiness",`<span class="toggle ${opsymPreferences.foregroundNotifications?"on":""}"></span>`,"notifications")}
+    ${row("target","CICE","Waiting-for review and closure prompts",`<span class="toggle ${opsymPreferences.ciceWaitingReview?"on":""}"></span>`,"cice")}
+    ${row("monitor","Interface","Responsive mobile interface",`<span class="setting-value">${opsymPreferences.compactMode?"Compact":"Comfortable"}</span>`,"interface")}
   </div></section>`;
   const left=intro("SETTINGS","Make Op-Sym work your way.","Preferences should support your workflow without becoming another task.");
   return `<section class="page">${isLandscape()?split(left,right):left+right}${bridgeSettingsMarkup_()}${diagnosticsPanel_()}</section>`;
@@ -2948,7 +3250,7 @@ function taskDetail(){
     <div class="task-actions" style="margin-top:14px">
       <button class="done" data-complete-task="${escapeHtml(t.taskId)}" data-task-title="${escapeHtml(t.title)}">Complete</button>
       <button data-reschedule-task="${escapeHtml(t.taskId)}" data-task-title="${escapeHtml(t.title)}" data-current-date="${escapeHtml(t.scheduledDateIso || "")}" data-current-time="${escapeHtml(t.startTime || "")}">Reschedule</button>
-      <button data-demo="more-actions">More</button>
+      <button data-task-more="${escapeHtml(t.taskId)}">More</button>
     </div>
   </section>`;
 
@@ -3057,7 +3359,6 @@ function render(route,replaceHash=false,options={}){
   if(opts.silent) appMain.classList.add("silent-render");
   appMain.innerHTML=fn();
   setActiveNav(route);
-  if(!replaceHash) history.pushState({route},"","#"+route);
   bindDynamic();
   document.getElementById("appMain").focus({preventScroll:true});
   window.scrollTo(0,0);
@@ -3204,19 +3505,52 @@ function bindDynamic(){
       catch(_){await opsymNotice({title:"Diagnostics",message:txt});}
     });
   }
-
-  document.querySelectorAll("[data-demo]").forEach(el=>{
-    el.addEventListener("click",()=>{
-      const label=el.dataset.demo.replace(/-/g," ");
-      toast(label.charAt(0).toUpperCase()+label.slice(1)+" - visual prototype");
-    });
-  });
+  document.querySelectorAll("[data-find-time]").forEach(el=>el.addEventListener("click",e=>{e.preventDefault();showFindTime_();}));
+  document.querySelectorAll("[data-plan-week]").forEach(el=>el.addEventListener("click",e=>{e.preventDefault();showWeekPlanner_();}));
+  document.querySelectorAll("[data-refresh-insights]").forEach(el=>el.addEventListener("click",e=>{e.preventDefault();refreshAnalytics_();}));
+  document.querySelectorAll("[data-task-more]").forEach(el=>el.addEventListener("click",e=>{e.preventDefault();showTaskMore_(el.dataset.taskMore||selectedTaskId);}));
+  document.querySelectorAll("[data-settings-action]").forEach(el=>el.addEventListener("click",e=>{
+    e.preventDefault();
+    const action=el.dataset.settingsAction;
+    if(action==="region-time")showRegionTimeSettings_();
+    else if(action==="scheduling")showSchedulingSettings_();
+    else if(action==="notifications")showNotificationSettings_();
+    else if(action==="cice")showCiceSettings_();
+    else if(action==="interface")showInterfaceSettings_();
+  }));
   document.querySelectorAll(".chip").forEach(el=>el.addEventListener("click",()=>{
     el.parentElement.querySelectorAll(".chip").forEach(x=>x.classList.remove("active"));
     el.classList.add("active");
   }));
-  document.querySelectorAll(".toggle").forEach(el=>el.addEventListener("click",e=>{
-    e.preventDefault();e.stopPropagation();el.classList.toggle("on");
+
+
+  document.querySelectorAll("[data-planner-open-tasks]").forEach(el=>el.addEventListener("click",()=>{
+    document.querySelector("#opsymPlannerBackdrop")?.remove();
+    document.body.classList.remove("opsym-modal-open");
+    activeTaskFilter="unscheduled";
+    safeNavigate_("tasks");
+  }));
+  document.querySelectorAll("[data-copy-task-title]").forEach(el=>el.addEventListener("click",async()=>{
+    const txt=el.dataset.copyTaskTitle||"";
+    try{await navigator.clipboard.writeText(txt);toast("Task title copied");}
+    catch(_){await opsymNotice({title:"Task title",message:txt});}
+  }));
+  document.querySelectorAll("[data-open-task-source]").forEach(el=>el.addEventListener("click",()=>{
+    const url=el.dataset.openTaskSource||"";
+    if(/^https?:\/\//i.test(url))window.open(url,"_blank","noopener");
+  }));
+  document.querySelectorAll("[data-task-provenance]").forEach(el=>el.addEventListener("click",async()=>{
+    const t=(liveTaskDetailData?.task)||{};
+    await opsymNotice({title:"Task provenance",message:[
+      `Signal: ${t.signalId||"Not recorded"}`,
+      `Source Inbox: ${t.sourceInboxId||"Not recorded"}`,
+      `Source type: ${captureSourceLabel(t.sourceType||"")||"Not recorded"}`,
+      `Source reference: ${t.sourceRef||"Not recorded"}`
+    ].join("\n")});
+  }));
+  document.querySelectorAll("[data-slot-time]").forEach(el=>el.addEventListener("click",async()=>{
+    const tm=el.dataset.slotTime||"";
+    await opsymNotice({title:"Available time",message:`${tm} is currently available within your configured working hours. Open an unscheduled Task and use Reschedule to place it here.`});
   }));
 
   document.querySelectorAll("[data-task-filter]").forEach(btn=>btn.addEventListener("click",()=>{
@@ -3334,7 +3668,7 @@ document.addEventListener("click",e=>{
 window.addEventListener("popstate",()=>{activeRoute=location.hash.replace("#","")||"home";safeNavigate_(activeRoute,{replace:true});});
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
 
-if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=192",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
+if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=193",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
 pendingSharedCapture=readShareTargetFromUrl();
 if(pendingSharedCapture) applyPendingSharedCapture();
 

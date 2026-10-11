@@ -1494,3 +1494,26 @@ body.opsym-modal-open{
   .opsym-bridge-actions{display:grid;grid-template-columns:1fr}
   .opsym-bridge-actions button{width:100%}
 }
+
+
+/* v1.9.3 Prototype Activation & Live Views */
+.opsym-planner-sheet{max-height:min(88vh,760px);overflow:auto}
+.opsym-planner-content{display:grid;gap:12px;padding-bottom:8px}
+.opsym-slot-grid{display:grid;gap:10px}
+.opsym-slot-card,.opsym-action-menu button{
+  width:100%;border:1px solid var(--line,#dfe7f0);background:#fff;border-radius:16px;
+  padding:14px;text-align:left;display:flex;flex-direction:column;gap:4px
+}
+.opsym-slot-card strong,.opsym-action-menu button strong{font-size:1rem}
+.opsym-slot-card span,.opsym-action-menu button span{font-size:.84rem;color:var(--muted,#6b7b90)}
+.opsym-plan-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 4px;border-bottom:1px solid var(--line,#e5ebf2)}
+.opsym-plan-row.warn strong{font-weight:800}
+.opsym-plan-row span{font-size:.84rem;color:var(--muted,#6b7b90);text-align:right}
+.opsym-action-menu{display:grid;gap:10px}
+.week-strip .day{appearance:none;font:inherit;color:inherit}
+.opsym-compact .section{padding-top:14px;padding-bottom:14px}
+.opsym-compact .task-card,.opsym-compact .more-card,.opsym-compact .insight{padding:13px}
+@media(max-width:560px){
+  .opsym-plan-row{align-items:flex-start;flex-direction:column;gap:4px}
+  .opsym-plan-row span{text-align:left}
+}
