@@ -59,7 +59,7 @@ let liveTodayLoaded = false;
 let liveTodayError = null;
 
 
-const OPSYM_UI_VERSION="1.9.1.4-render-runtime-fix";
+const OPSYM_UI_VERSION="1.9.2-minor-issues-consolidation";
 const OPSYM_NATIVE_WRAPPER_VERSION="1.9.0-native.2";
 const opsymDiag={
   uiVersion:OPSYM_UI_VERSION,
@@ -391,11 +391,21 @@ function captureSourceLabel(v){
 }
 function detectSharedSource({title="",text="",url=""}={}){
   const hay=(title+" "+text+" "+url).toLowerCase();
-  if(/whatsapp|wa\.me|api\.whatsapp/.test(hay))return "WHATSAPP";
-  if(/gmail|mail\.google|outlook|mailto:/.test(hay))return "EMAIL";
-  if(/sms:|messages?/.test(hay))return "SMS";
+
+  // Use only evidence actually present in the share payload.
+  // Android/PWA Share Target does not reliably expose the originating
+  // application package name, so unknown sources remain ANDROID_SHARE
+  // instead of being guessed incorrectly.
+  if(/\bwhatsapp\b|wa\.me|api\.whatsapp/.test(hay))return "WHATSAPP";
+  if(/\bgmail\b|mail\.google|outlook|mailto:/.test(hay))return "EMAIL";
+  if(/\bsms\b|sms:|\bmessages?\b/.test(hay))return "SMS";
+  if(/\bchrome\b|\bfirefox\b|\bedge\b|\bsafari\b/.test(hay))return "BROWSER";
   if(/^https?:/i.test(String(url||"")))return "BROWSER";
   return "ANDROID_SHARE";
+}
+
+function captureSourceNeedsConfirmation_(sourceType){
+  return normalizeCaptureSourceType(sourceType)==="ANDROID_SHARE";
 }
 function readShareTargetFromUrl(){
   try{
@@ -523,7 +533,21 @@ function detectSemanticIntent(source){
   return "TASK";
 }
 
-function extractSemanticPerson(source,intent){let m=null;if(intent==="MEET")m=source.match(/\b(?:meet|see|meeting with)\s+(.+?)(?=\s+(?:at|in|via|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);else if(intent==="CALL")m=source.match(/\b(?:call|phone|ring)\s+(.+?)(?=\s+(?:at|in|via|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);if(!m)m=source.match(/\b(?:waiting for|awaiting|pending from)\s+(.+?)(?=\s+(?:to|until|on|next|this|today|tomorrow)\b|[,.;]|$)/i);if(!m)m=source.match(/\b(?:ask|tell)\s+(.+?)\s+to\b/i);return m?collapseRepeatedWords(String(m[1]||"").trim()):"";}
+function extractSemanticPerson(source,intent){
+  let m=null;
+  if(intent==="MEET")m=source.match(/\b(?:meet|see|meeting with)\s+(.+?)(?=\s+(?:at|in|via|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);
+  else if(intent==="CALL")m=source.match(/\b(?:call|phone|ring)\s+(.+?)(?=\s+(?:at|in|via|on|next|this|today|tomorrow|for)\b|[,.;]|$)/i);
+
+  if(!m)m=source.match(/\b(?:waiting for|awaiting|pending from)\s+(.+?)(?=\s+(?:to|until|on|next|this|today|tomorrow)\b|[,.;]|$)/i);
+  if(!m)m=source.match(/\b(?:ask|tell)\s+(.+?)\s+to\b/i);
+
+  // Common DO/communication pattern:
+  // "Send Hassan the agreement", "Email Peter the report",
+  // "Forward Mary the document", "Message Ali tomorrow".
+  if(!m)m=source.match(/\b(?:send|email|e-mail|forward|share|message|text|give)\s+(?:to\s+)?([A-Z][A-Za-z.'’\-]+(?:\s+[A-Z][A-Za-z.'’\-]+){0,2})(?=\s+(?:the|a|an|my|our|his|her|their|this|that|revised|final|signed|updated|report|agreement|document|file|link|message|today|tomorrow|on|at|in|by|before|after|next|this|morning|afternoon|evening|tonight)\b|[,.;]|$)/);
+
+  return m?collapseRepeatedWords(String(m[1]||"").trim()):"";
+}
 
 function extractSemanticLocation(source){
   // Explicit labels take precedence.
@@ -670,6 +694,29 @@ function resolveSemanticTime(source,warnings,detected){
     }
   }
 
+  // Deterministic daypart defaults. These are proposals and remain editable
+  // in Review & Classify before creation.
+  if(/\bmorning\b/i.test(source)){
+    detected.push("morning");
+    warnings.push("Morning was interpreted as 09:00. Review the time before creating.");
+    return "09:00";
+  }
+  if(/\bafternoon\b/i.test(source)){
+    detected.push("afternoon");
+    warnings.push("Afternoon was interpreted as 14:00. Review the time before creating.");
+    return "14:00";
+  }
+  if(/\bevening\b/i.test(source)){
+    detected.push("evening");
+    warnings.push("Evening was interpreted as 18:00. Review the time before creating.");
+    return "18:00";
+  }
+  if(/\btonight\b/i.test(source)){
+    detected.push("tonight");
+    warnings.push("Tonight was interpreted as 19:00. Review the time before creating.");
+    return "19:00";
+  }
+
   return "";
 }
 
@@ -710,6 +757,7 @@ function buildSemanticTitle(source,intent,personName,location){
 
   let title=source
     .replace(/\b(today|tomorrow)\b/ig," ")
+    .replace(/\b(?:in\s+the\s+)?(morning|afternoon|evening|tonight)\b/ig," ")
     .replace(/\bnext\s+week(?:\s+on)?\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig," ")
     .replace(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+next\s+week\b/ig," ")
     .replace(/\bthis\s+week(?:\s+on)?\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/ig," ")
@@ -1121,7 +1169,7 @@ async function checkCreateRequestStatus(requestId,timeoutMs=8000){
 }
 
 async function finishSuccessfulTaskCreation(result){
-  toast(result.timings?.totalMs?`Created ${result.taskId||"task"} in ${(result.timings.totalMs/1000).toFixed(1)}s`:`Created ${result.taskId||"task"}`);
+  toast(`Task saved · ${result.taskId||"confirmed"}`);
   const destination=captureEntryMode==="today"?"today":"tasks";
   const sourceInboxId=interpretedCaptureDraft?.sourceInboxId||"";
 
@@ -1604,7 +1652,7 @@ async function clarifyToCommitment(id){
 
     endOperation(op,"Commitment created");
     recordOpsymPerf("promote-inbox-commitment",{clientMs:Math.round(performance.now()-clientT0),server:r.timings||null,directAck:!!r.directAck,reconciled:!!r.reconciled});
-    toast(r.timings?.totalMs?`Created ${r.commitmentId||"commitment"} in ${(r.timings.totalMs/1000).toFixed(1)}s`:`Created ${r.commitmentId||"commitment"}`);
+    toast(`Commitment saved · ${r.commitmentId||"confirmed"}`);
     render("commitments",true);
 
     liveInboxLoaded=false;liveCommitmentsLoaded=false;
@@ -2641,13 +2689,9 @@ function prettyDiagResponse_(){
 }
 function diagnosticsPanel_(){
   return `
-  <section class="card opsym-diagnostic-card">
-    <div class="section-title">Diagnostics</div>
-    <div class="muted">Temporary diagnostic panel for the Task save-state issue.</div>
-    <div class="diag-grid">
-      <div><span>UI version</span><strong>${escapeHtml(opsymDiag.uiVersion||"")}</strong></div>
-      <div><span>Mobile Bridge</span><strong id="diagBridgeVersion">${escapeHtml(opsymDiag.bridgeVersion||"Checking...")}</strong></div>
-      <div><span>Native wrapper</span><strong>${escapeHtml(opsymDiag.nativeWrapperVersion||"")}</strong></div>
+  <details class="card opsym-diagnostic-card opsym-advanced-diagnostics">
+    <summary><strong>Advanced diagnostics</strong><span>Technical troubleshooting information</span></summary>
+    <div class="diag-grid" style="margin-top:12px">
       <div><span>Last request ID</span><strong>${escapeHtml(opsymDiag.lastTaskRequestId||"—")}</strong></div>
       <div><span>confirmPendingTask()</span><strong>${opsymDiag.confirmPendingTaskRan?"YES":"NO"}</strong></div>
       <div><span>Confirmed Task ID</span><strong>${escapeHtml(opsymDiag.lastConfirmedTaskId||"—")}</strong></div>
@@ -2658,12 +2702,42 @@ function diagnosticsPanel_(){
       <div><span>Navigation recovered at</span><strong>${escapeHtml(opsymDiag.navigationRecoveredAt||"—")}</strong></div>
     </div>
     <details class="diag-response">
+      <summary>Last navigation error stack</summary>
+      <pre>${escapeHtml(opsymDiag.lastNavigationStack||"No navigation stack recorded.")}</pre>
+    </details>
+    <details class="diag-response">
       <summary>Last backend task response</summary>
       <pre>${escapeHtml(prettyDiagResponse_())}</pre>
     </details>
     <div class="clarify-primary-actions">
-      <button class="ghost-btn" type="button" id="diagRefreshBtn">Refresh bridge version</button>
       <button class="ghost-btn" type="button" id="diagCopyBtn">Copy diagnostics</button>
+    </div>
+  </details>`;
+}
+
+function bridgeSettingsMarkup_(){
+  const configured=!!mobileBridge.endpoint;
+  return `<section class="section white opsym-system-settings">
+    <div class="section-head"><div><span class="kicker">SYSTEM</span><h2>Connection & version</h2><p>Manage the Op-Sym Mobile Bridge from Settings.</p></div></div>
+
+    <div class="new-task-form">
+      <label class="form-field full">
+        <span>Mobile Bridge / Apps Script Web App URL</span>
+        <input id="bridgeEndpointInput" type="url" autocomplete="off" spellcheck="false"
+          placeholder="https://script.google.com/macros/s/.../exec"
+          value="${escapeHtml(mobileBridge.endpoint||"")}">
+      </label>
+      <div class="form-actions opsym-bridge-actions">
+        <button class="primary-btn" type="button" id="bridgeSaveTestBtn">Save & test</button>
+        <button class="ghost-btn" type="button" id="bridgeClearBtn" ${configured?"":"disabled"}>Clear</button>
+      </div>
+    </div>
+
+    <div class="diag-grid opsym-about-grid">
+      <div><span>UI version</span><strong>${escapeHtml(OPSYM_UI_VERSION)}</strong></div>
+      <div><span>Mobile Bridge</span><strong id="diagBridgeVersion">${escapeHtml(opsymDiag.bridgeVersion||"Checking...")}</strong></div>
+      <div><span>Native wrapper</span><strong>${escapeHtml(OPSYM_NATIVE_WRAPPER_VERSION)}</strong></div>
+      <div><span>Connection</span><strong>${configured?"Configured":"Not configured"}</strong></div>
     </div>
   </section>`;
 }
@@ -2673,18 +2747,20 @@ function settings(){
     const el=document.getElementById("diagBridgeVersion");
     if(el)el.textContent=opsymDiag.bridgeVersion||"Unknown";
   }).catch(()=>{}),0);
+
   const row=(ic,title,sub,end)=>`<button class="setting-row" data-demo="${title}"><span class="row-icon">${icon(ic)}</span><span class="row-copy"><strong>${title}</strong><small>${sub}</small></span>${end}</button>`;
   const right=`<section class="section"><div class="settings-group">
     ${row("clock","Region & time","Africa/Nairobi · 24-hour clock",`<span class="setting-value">Kenya</span>`)}
     ${row("calendar","Scheduling","Working days, gap rules and buffers",`<span class="setting-value">Edit</span>`)}
     ${row("alert","Notifications","Quiet hours and reminders",`<span class="toggle on"></span>`)}
     ${row("target","CICE","Closure and waiting-for intelligence",`<span class="toggle on"></span>`)}
-    ${row("monitor","Interface","Mobile visual prototype",`<span class="setting-value">Mobile</span>`)}
+    ${row("monitor","Interface","Responsive mobile interface",`<span class="setting-value">Mobile</span>`)}
     <button class="setting-row" type="button" data-pwa-diagnostics><span class="row-icon">${icon("monitor")}</span><span class="row-copy"><strong>PWA & sharing diagnostics</strong><small>Check standalone mode, service worker and share launch.</small></span><span class="setting-value">Check</span></button>
   </div></section>`;
   const left=intro("SETTINGS","Make Op-Sym work your way.","Preferences should support your workflow without becoming another task.");
-  return `<section class="page">${isLandscape()?split(left,right):left+right}${diagnosticsPanel_()}</section>`;
+  return `<section class="page">${isLandscape()?split(left,right):left+right}${bridgeSettingsMarkup_()}${diagnosticsPanel_()}</section>`;
 }
+
 function capture(){
   const taskMode=captureEntryMode==="task" || captureEntryMode==="today" || captureEntryMode==="interpreted";
 
@@ -2776,7 +2852,10 @@ function capture(){
   const sourceType=normalizeCaptureSourceType(captureSourceDraft.sourceType||"MANUAL");
   const prefill=shared?.rawText||"";
   const sourceOptions=OPSYM_CAPTURE_SOURCES.map(v=>`<option value="${v}" ${sourceType===v?"selected":""}>${escapeHtml(captureSourceLabel(v))}</option>`).join("");
-  const sourceBanner=shared?`<div class="share-intake-banner"><strong>Shared into Op-Sym</strong><span>${escapeHtml(captureSourceLabel(sourceType))} content is ready for review. Nothing will be created until you press Capture to Inbox.</span></div>`:"";
+  const sourceNeedsConfirmation=shared && captureSourceNeedsConfirmation_(sourceType);
+  const sourceBanner=shared?`<div class="share-intake-banner"><strong>Shared into Op-Sym</strong><span>${sourceNeedsConfirmation
+    ? "Android did not provide the originating app name. Please confirm the Source below before capturing."
+    : `${escapeHtml(captureSourceLabel(sourceType))} content is ready for review.`} Nothing will be created until you press Capture to Inbox.</span></div>`:"";
   const right=`<section class="section white"><form id="inboxCaptureForm" class="new-task-form">${sourceBanner}<label class="form-field full"><span>What do you need to remember?</span><textarea id="inboxCaptureText" rows="6" placeholder="e.g. Waiting for Gilbert to send the revised architecture next Tuesday">${escapeHtml(prefill)}</textarea></label><div class="capture-source-grid"><label class="form-field"><span>Source</span><select id="captureSourceType">${sourceOptions}</select></label><label class="form-field"><span>Source reference</span><input id="captureSourceRef" type="text" maxlength="300" placeholder="Optional sender, thread or note" value="${escapeHtml(captureSourceDraft.sourceRef||"")}"></label><label class="form-field full"><span>Source link</span><input id="captureSourceUrl" type="url" maxlength="1000" placeholder="Optional link back to the source" value="${escapeHtml(captureSourceDraft.sourceUrl||"")}"></label></div><div class="capture-consent-note">Op-Sym records only what you explicitly share or capture here. It does not silently read WhatsApp, SMS, calls or other apps.</div><div class="form-actions"><button class="ghost-btn" type="button" data-route="${isCommitment?"commitments":"inbox"}">Cancel</button><button class="primary-btn" type="submit">Capture to Inbox</button></div></form></section>`;
   return `<section class="page">${isLandscape()?split(left,right):left+right}</section>`;
 }
@@ -2850,6 +2929,11 @@ function taskDetail(){
       ${taskInfoRow("Reschedule count",t.rescheduleCount)}
       ${taskInfoRow("Clash flag",t.clashFlag)}
       ${taskInfoRow("Deadline risk",t.deadlineRisk)}
+      ${taskInfoRow("Source Inbox",t.sourceInboxId)}
+      ${taskInfoRow("Signal",t.signalId)}
+      ${taskInfoRow("Source type",captureSourceLabel(t.sourceType||""))}
+      ${taskInfoRow("Source reference",t.sourceRef)}
+      ${taskInfoRow("Source link",t.sourceUrl)}
       ${taskInfoRow("Created",t.created)}
     </div>`;
   }
@@ -3052,6 +3136,55 @@ document.addEventListener("click",e=>{
 });
 
 function bindDynamic(){
+  const bridgeSave=document.getElementById("bridgeSaveTestBtn");
+  if(bridgeSave && !bridgeSave.dataset.bound){
+    bridgeSave.dataset.bound="1";
+    bridgeSave.addEventListener("click",async()=>{
+      const input=document.getElementById("bridgeEndpointInput");
+      const endpoint=String(input?.value||"").trim();
+      if(!endpoint){
+        await opsymNotice({title:"Bridge URL required",message:"Paste the Google Apps Script Web App URL ending in /exec."});
+        input?.focus();
+        return;
+      }
+      if(!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:[?#].*)?$/i.test(endpoint)){
+        await opsymNotice({title:"Check the URL",message:"Use the deployed Google Apps Script Web App URL. It should begin with https://script.google.com/macros/s/ and end in /exec."});
+        return;
+      }
+
+      bridgeSave.disabled=true;
+      bridgeSave.textContent="Testing…";
+      try{
+        saveMobileBridgeConfig(endpoint.split(/[?#]/)[0],"");
+        await refreshDiagnosticBridgeVersion_();
+        const ok=opsymDiag.bridgeVersion && !String(opsymDiag.bridgeVersion).startsWith("Error") && opsymDiag.bridgeVersion!=="Not configured";
+        if(ok){
+          await Promise.allSettled([loadLiveHomeData(false),loadLiveTodayData(false),loadLiveTasksData(false)]);
+          await opsymNotice({title:"Mobile Bridge connected",message:`Connected successfully.\nBridge version: ${opsymDiag.bridgeVersion}`});
+        }else{
+          await opsymNotice({title:"Connection needs attention",message:`The URL was saved, but Op-Sym could not confirm the bridge.\n\n${opsymDiag.bridgeVersion||"Unknown response"}`});
+        }
+      }catch(err){
+        await opsymNotice({title:"Bridge setup failed",message:String(err?.message||err)});
+      }finally{
+        if(currentRoute()==="settings")safeNavigate_("settings",{replace:true});
+      }
+    });
+  }
+
+  const bridgeClear=document.getElementById("bridgeClearBtn");
+  if(bridgeClear && !bridgeClear.dataset.bound){
+    bridgeClear.dataset.bound="1";
+    bridgeClear.addEventListener("click",async()=>{
+      const ok=await opsymConfirm({title:"Clear Mobile Bridge?",message:"This removes the saved Apps Script URL from this device. Your spreadsheet data is not deleted.",confirmLabel:"Clear"});
+      if(!ok)return;
+      clearMobileBridgeConfig();
+      updateOpsymDiag_({bridgeVersion:"Not configured"});
+      toast("Mobile Bridge settings cleared");
+      if(currentRoute()==="settings")safeNavigate_("settings",{replace:true});
+    });
+  }
+
   const diagRefresh=document.getElementById("diagRefreshBtn");
   if(diagRefresh && !diagRefresh.dataset.bound){
     diagRefresh.dataset.bound="1";
@@ -3201,7 +3334,7 @@ document.addEventListener("click",e=>{
 window.addEventListener("popstate",()=>{activeRoute=location.hash.replace("#","")||"home";safeNavigate_(activeRoute,{replace:true});});
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
 
-if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1914",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
+if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=192",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
 pendingSharedCapture=readShareTargetFromUrl();
 if(pendingSharedCapture) applyPendingSharedCapture();
 
