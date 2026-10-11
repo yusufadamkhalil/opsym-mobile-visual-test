@@ -59,7 +59,7 @@ let liveTodayLoaded = false;
 let liveTodayError = null;
 
 
-const OPSYM_UI_VERSION="1.9.3-prototype-activation";
+const OPSYM_UI_VERSION="1.9.4-launch-timezone-findtime";
 const OPSYM_NATIVE_WRAPPER_VERSION="1.9.0-native.2";
 const opsymDiag={
   uiVersion:OPSYM_UI_VERSION,
@@ -129,6 +129,7 @@ const defaultOpsymPreferences={
   workDays:[1,2,3,4,5],
   minGapMin:15,
   defaultTaskMin:60,
+  findTimeDurationMin:60,
   quietHoursEnabled:true,
   quietStart:"21:00",
   quietEnd:"07:00",
@@ -293,16 +294,115 @@ function plannerSheet_(title,subtitle,bodyHtml){
   el.addEventListener("click",e=>{if(e.target===el){el.remove();document.body.classList.remove("opsym-modal-open");}});
   setTimeout(()=>el.querySelector(".smart-sheet")?.focus(),0);
 }
+function findTimeDurationOptions_(selected=60){
+  const options=[30,45,60,90,120];
+  return options.map(v=>`<option value="${v}" ${Number(selected)===v?"selected":""}>${v===60?"1 hour":v===120?"2 hours":v+" minutes"}</option>`).join("")+
+    `<option value="custom" ${![30,45,60,90,120].includes(Number(selected))?"selected":""}>Custom</option>`;
+}
+function splitFreeWindowsIntoSlots_(windows,durationMin){
+  const duration=Math.max(15,Math.min(480,Number(durationMin)||60));
+  const slots=[];
+  windows.forEach(w=>{
+    let cursor=w.start;
+    while(cursor+duration<=w.end){
+      slots.push({start:cursor,end:cursor+duration});
+      cursor+=duration;
+    }
+  });
+  return slots;
+}
+function findTimeSlotRows_(durationMin){
+  const windows=todayFreeWindows_();
+  const slots=splitFreeWindowsIntoSlots_(windows,durationMin);
+  if(!slots.length){
+    return `<div class="empty-card"><strong>No ${durationMin}-minute slot found today</strong><small>Try a shorter duration or adjust working hours/gap rules.</small></div>`;
+  }
+  return slots.map(slot=>`<button class="opsym-slot-card" type="button"
+      data-find-slot-start="${timeFromMinutes_(slot.start)}"
+      data-find-slot-end="${timeFromMinutes_(slot.end)}"
+      data-find-slot-duration="${durationMin}">
+    <strong>${timeFromMinutes_(slot.start)}-${timeFromMinutes_(slot.end)}</strong>
+    <span>${durationMin===60?"1 hour":durationMin+" minutes"} available</span>
+  </button>`).join("");
+}
+function unscheduledTaskOptions_(){
+  const tasks=liveTaskArray_().filter(t=>t.isUnscheduled);
+  return `<option value="">Choose an unscheduled Task</option>`+
+    tasks.map(t=>`<option value="${escapeHtml(t.taskId)}">${escapeHtml(t.title||t.taskId)}</option>`).join("");
+}
 async function showFindTime_(){
   await ensurePlanningData_();
-  const windows=todayFreeWindows_();
-  const unscheduled=liveTaskArray_().filter(t=>t.isUnscheduled).slice(0,5);
-  const rows=windows.length?windows.map(w=>`<button class="opsym-slot-card" type="button" data-slot-time="${timeFromMinutes_(w.start)}">
-    <strong>${timeFromMinutes_(w.start)}-${timeFromMinutes_(w.end)}</strong>
-    <span>${w.end-w.start} min available</span>
-  </button>`).join(""):`<div class="empty-card"><strong>No 30-minute window found</strong><small>Adjust working hours or gap rules in Settings.</small></div>`;
-  const pending=unscheduled.length?`<div class="detail-note"><span>Unscheduled work</span><p>${unscheduled.map(t=>escapeHtml(t.title)).join(" · ")}</p></div>`:"";
-  plannerSheet_("Find time","Available windows are calculated from today's live schedule and your working-hour preferences.",`<div class="opsym-slot-grid">${rows}</div>${pending}`);
+  const preferred=Math.max(15,Number(opsymPreferences.findTimeDurationMin)||60);
+  const customSelected=![30,45,60,90,120].includes(preferred);
+  const unscheduled=liveTaskArray_().filter(t=>t.isUnscheduled);
+  plannerSheet_("Find time","Choose how much time you need. Op-Sym will show practical slots inside today's free windows.",`
+    <div class="opsym-findtime-controls">
+      <label class="form-field">
+        <span>Duration</span>
+        <select id="findTimeDurationSelect">${findTimeDurationOptions_(preferred)}</select>
+      </label>
+      <label class="form-field ${customSelected?"":"opsym-hidden"}" id="findTimeCustomWrap">
+        <span>Custom minutes</span>
+        <input id="findTimeCustomMinutes" type="number" min="15" max="480" step="5" value="${preferred}">
+      </label>
+    </div>
+    <div class="detail-note">
+      <span>Working window</span>
+      <p>${escapeHtml(opsymPreferences.workStart)}-${escapeHtml(opsymPreferences.workEnd)} · ${Number(opsymPreferences.minGapMin)||0} min protected gap</p>
+    </div>
+    <div class="opsym-slot-grid" id="findTimeSlots">${findTimeSlotRows_(preferred)}</div>
+    ${unscheduled.length?`<div class="detail-note"><span>Assign a slot</span><p>Tap a time, then choose an unscheduled Task and confirm.</p></div>`:`<div class="detail-note"><span>No unscheduled Tasks</span><p>You can still review available times, but there is currently no unscheduled Task to place.</p></div>`}
+  `);
+}
+async function assignFindTimeSlot_(start,end,durationMin){
+  const tasks=liveTaskArray_().filter(t=>t.isUnscheduled);
+  if(!tasks.length){
+    await opsymNotice({title:"Available time",message:`${start}-${end} is available today. There are no unscheduled Tasks to assign right now.`});
+    return;
+  }
+  const options=unscheduledTaskOptions_();
+  plannerSheet_("Assign available time",`${start}-${end} · ${durationMin} minutes`,` 
+    <div class="new-task-form">
+      <label class="form-field full">
+        <span>Unscheduled Task</span>
+        <select id="findTimeTaskSelect">${options}</select>
+      </label>
+      <div class="form-actions">
+        <button class="primary-btn" type="button" data-confirm-findtime-slot
+          data-find-slot-start="${escapeHtml(start)}"
+          data-find-slot-end="${escapeHtml(end)}"
+          data-find-slot-duration="${escapeHtml(durationMin)}">Assign this time</button>
+        <button class="ghost-btn" type="button" data-return-findtime>Back to times</button>
+      </div>
+    </div>`);
+}
+async function confirmFindTimeAssignment_(taskId,start,end){
+  const t=liveTaskArray_().find(x=>String(x.taskId)===String(taskId));
+  if(!t){
+    await opsymNotice({title:"Choose a Task",message:"Select an unscheduled Task first."});
+    return;
+  }
+  const date=ymdLocal_(new Date());
+  if(!mobileBridge.endpoint){
+    await opsymNotice({title:"Mobile Bridge required",message:"Connect the Mobile Bridge before assigning a Task to a time."});
+    return;
+  }
+  try{
+    const checkParams={action:"check-reschedule",taskId:t.taskId,date,time:start};
+    if(mobileBridge.key)checkParams.key=mobileBridge.key;
+    const check=await jsonpRequest(mobileBridge.endpoint,checkParams,12000);
+    if(!check||check.ok!==true)throw new Error(check?.error||"Could not check the selected time.");
+    const preview=check.data||{};
+    if(preview.hasConflict){
+      await opsymNotice({title:"Time no longer available",message:"The selected time now conflicts with another scheduled item. Refresh Find time and choose another slot."});
+      return;
+    }
+    document.querySelector("#opsymPlannerBackdrop")?.remove();
+    document.body.classList.remove("opsym-modal-open");
+    await confirmAndWriteReschedule(t.taskId,t.title||t.taskId,preview);
+  }catch(err){
+    await opsymNotice({title:"Could not assign time",message:String(err?.message||err)});
+  }
 }
 async function showWeekPlanner_(){
   await ensurePlanningData_();
@@ -336,14 +436,46 @@ function showTaskMore_(taskId){
       <button type="button" data-task-provenance="${escapeHtml(taskId)}"><strong>View provenance</strong><span>Show Signal and Inbox traceability.</span></button>
     </div>`);
 }
+function timezoneValues_(){
+  try{
+    if(Intl.supportedValuesOf)return Intl.supportedValuesOf("timeZone");
+  }catch(_){}
+  return [
+    "Africa/Nairobi","Africa/Addis_Ababa","Africa/Dar_es_Salaam","Africa/Kampala",
+    "Africa/Mogadishu","Africa/Johannesburg","Africa/Cairo","Africa/Lagos","Africa/Accra",
+    "Asia/Dubai","Asia/Riyadh","Asia/Doha","Asia/Kuwait","Asia/Muscat","Asia/Karachi",
+    "Asia/Kolkata","Asia/Singapore","Asia/Tokyo","Australia/Perth","Australia/Adelaide",
+    "Australia/Brisbane","Australia/Sydney","Europe/London","Europe/Paris","Europe/Berlin",
+    "Europe/Rome","Europe/Amsterdam","America/New_York","America/Chicago","America/Denver",
+    "America/Los_Angeles","America/Toronto","Pacific/Auckland"
+  ];
+}
+function timezoneOptionsMarkup_(){
+  const zones=timezoneValues_();
+  return zones.map(z=>`<option value="${escapeHtml(z)}"></option>`).join("");
+}
 async function showRegionTimeSettings_(){
-  const timezone=await opsymPrompt({title:"Timezone",message:"Enter an IANA timezone, for example Africa/Nairobi.",value:opsymPreferences.timezone,confirmLabel:"Next"});
-  if(timezone===null)return;
-  const format=await opsymPrompt({title:"Time format",message:"Enter 24 for 24-hour time or 12 for 12-hour time.",value:opsymPreferences.timeFormat,confirmLabel:"Save"});
-  if(format===null)return;
-  saveOpsymPreferences_({timezone:String(timezone).trim()||"Africa/Nairobi",timeFormat:String(format).trim()==="12"?"12":"24"});
-  toast("Region & time saved");
-  render("settings",true);
+  plannerSheet_("Region & time","Search or choose a timezone, then select your preferred clock format.",`
+    <div class="new-task-form">
+      <label class="form-field full">
+        <span>Timezone</span>
+        <input id="timezonePickerInput" list="opsymTimezoneList" autocomplete="off"
+          value="${escapeHtml(opsymPreferences.timezone||"Africa/Nairobi")}"
+          placeholder="Search city or timezone">
+        <datalist id="opsymTimezoneList">${timezoneOptionsMarkup_()}</datalist>
+        <small>Start typing, for example Nairobi, Dubai, London or Sydney.</small>
+      </label>
+      <label class="form-field full">
+        <span>Time format</span>
+        <select id="timeFormatSelect">
+          <option value="24" ${String(opsymPreferences.timeFormat)==="24"?"selected":""}>24-hour clock</option>
+          <option value="12" ${String(opsymPreferences.timeFormat)==="12"?"selected":""}>12-hour clock</option>
+        </select>
+      </label>
+      <div class="form-actions">
+        <button class="primary-btn" type="button" data-save-region-time>Save region & time</button>
+      </div>
+    </div>`);
 }
 async function showSchedulingSettings_(){
   const start=await opsymPrompt({title:"Working day starts",message:"Use HH:MM, for example 08:00.",value:opsymPreferences.workStart,confirmLabel:"Next"});
@@ -3524,6 +3656,81 @@ function bindDynamic(){
   }));
 
 
+
+  const findDuration=document.getElementById("findTimeDurationSelect");
+  if(findDuration && !findDuration.dataset.bound){
+    findDuration.dataset.bound="1";
+    findDuration.addEventListener("change",()=>{
+      const wrap=document.getElementById("findTimeCustomWrap");
+      if(findDuration.value==="custom"){
+        wrap?.classList.remove("opsym-hidden");
+        document.getElementById("findTimeCustomMinutes")?.focus();
+        return;
+      }
+      wrap?.classList.add("opsym-hidden");
+      const duration=Number(findDuration.value)||60;
+      saveOpsymPreferences_({findTimeDurationMin:duration});
+      const target=document.getElementById("findTimeSlots");
+      if(target)target.innerHTML=findTimeSlotRows_(duration);
+      bindDynamic();
+    });
+  }
+  const customDuration=document.getElementById("findTimeCustomMinutes");
+  if(customDuration && !customDuration.dataset.bound){
+    customDuration.dataset.bound="1";
+    const refreshCustom=()=>{
+      const duration=Math.max(15,Math.min(480,Number(customDuration.value)||60));
+      saveOpsymPreferences_({findTimeDurationMin:duration});
+      const target=document.getElementById("findTimeSlots");
+      if(target)target.innerHTML=findTimeSlotRows_(duration);
+      bindDynamic();
+    };
+    customDuration.addEventListener("change",refreshCustom);
+    customDuration.addEventListener("blur",refreshCustom);
+  }
+  document.querySelectorAll("[data-find-slot-start]").forEach(el=>{
+    if(el.dataset.findSlotBound)return;
+    el.dataset.findSlotBound="1";
+    el.addEventListener("click",()=>{
+      assignFindTimeSlot_(el.dataset.findSlotStart||"",el.dataset.findSlotEnd||"",Number(el.dataset.findSlotDuration)||60);
+    });
+  });
+  document.querySelectorAll("[data-return-findtime]").forEach(el=>{
+    if(el.dataset.bound)return;
+    el.dataset.bound="1";
+    el.addEventListener("click",()=>showFindTime_());
+  });
+  document.querySelectorAll("[data-confirm-findtime-slot]").forEach(el=>{
+    if(el.dataset.bound)return;
+    el.dataset.bound="1";
+    el.addEventListener("click",()=>{
+      const taskId=document.getElementById("findTimeTaskSelect")?.value||"";
+      confirmFindTimeAssignment_(taskId,el.dataset.findSlotStart||"",el.dataset.findSlotEnd||"");
+    });
+  });
+  document.querySelectorAll("[data-save-region-time]").forEach(el=>{
+    if(el.dataset.bound)return;
+    el.dataset.bound="1";
+    el.addEventListener("click",async()=>{
+      const tz=String(document.getElementById("timezonePickerInput")?.value||"").trim();
+      const fmt=String(document.getElementById("timeFormatSelect")?.value||"24");
+      const zones=timezoneValues_();
+      if(!tz){
+        await opsymNotice({title:"Choose a timezone",message:"Select or type a timezone first."});
+        return;
+      }
+      if(zones.length && !zones.includes(tz)){
+        const proceed=await opsymConfirm({title:"Timezone not in list",message:`"${tz}" was not found in the browser's timezone list. Save it anyway?`,confirmLabel:"Save",cancelLabel:"Choose again"});
+        if(!proceed)return;
+      }
+      saveOpsymPreferences_({timezone:tz,timeFormat:fmt==="12"?"12":"24"});
+      document.querySelector("#opsymPlannerBackdrop")?.remove();
+      document.body.classList.remove("opsym-modal-open");
+      toast("Region & time saved");
+      if(currentRoute()==="settings")render("settings",true);
+    });
+  });
+
   document.querySelectorAll("[data-planner-open-tasks]").forEach(el=>el.addEventListener("click",()=>{
     document.querySelector("#opsymPlannerBackdrop")?.remove();
     document.body.classList.remove("opsym-modal-open");
@@ -3547,10 +3754,6 @@ function bindDynamic(){
       `Source type: ${captureSourceLabel(t.sourceType||"")||"Not recorded"}`,
       `Source reference: ${t.sourceRef||"Not recorded"}`
     ].join("\n")});
-  }));
-  document.querySelectorAll("[data-slot-time]").forEach(el=>el.addEventListener("click",async()=>{
-    const tm=el.dataset.slotTime||"";
-    await opsymNotice({title:"Available time",message:`${tm} is currently available within your configured working hours. Open an unscheduled Task and use Reschedule to place it here.`});
   }));
 
   document.querySelectorAll("[data-task-filter]").forEach(btn=>btn.addEventListener("click",()=>{
@@ -3668,7 +3871,7 @@ document.addEventListener("click",e=>{
 window.addEventListener("popstate",()=>{activeRoute=location.hash.replace("#","")||"home";safeNavigate_(activeRoute,{replace:true});});
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
 
-if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=193",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
+if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=194",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
 pendingSharedCapture=readShareTargetFromUrl();
 if(pendingSharedCapture) applyPendingSharedCapture();
 
@@ -3680,7 +3883,12 @@ try{
   localInterpreterReady=false;
 }
 
-render(pendingSharedCapture?"capture":(location.hash.replace("#","")||"home"),true);
+// Fresh app/page launches always begin at Home for a predictable start.
+// Share-target launches are the exception and go directly to Capture.
+const initialRoute=pendingSharedCapture?"capture":"home";
+activeRoute=initialRoute;
+history.replaceState({route:initialRoute},"","#"+initialRoute);
+render(initialRoute,true);
 loadLiveTodayData(false);
 loadLiveTasksData(false);
 

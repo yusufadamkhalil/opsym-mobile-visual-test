@@ -1517,3 +1517,34 @@ body.opsym-modal-open{
   .opsym-plan-row{align-items:flex-start;flex-direction:column;gap:4px}
   .opsym-plan-row span{text-align:left}
 }
+
+
+/* v1.9.4 Launch, Timezone & Find-Time UX */
+.opsym-findtime-controls{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  gap:12px;
+}
+.opsym-hidden{display:none!important}
+.form-field select,
+.form-field input[list]{
+  width:100%;
+  min-height:48px;
+  border:1px solid var(--line,#dfe7f0);
+  border-radius:14px;
+  padding:0 12px;
+  background:#fff;
+  color:inherit;
+  font:inherit;
+}
+.form-field small{
+  display:block;
+  margin-top:6px;
+  color:var(--muted,#6b7b90);
+  font-size:.78rem;
+  line-height:1.35;
+}
+#findTimeTaskSelect{min-height:52px}
+@media(max-width:560px){
+  .opsym-findtime-controls{grid-template-columns:1fr}
+}
