@@ -1548,3 +1548,7 @@ body.opsym-modal-open{
 @media(max-width:560px){
   .opsym-findtime-controls{grid-template-columns:1fr}
 }
+
+
+/* v1.9.4.1 Find-Time Duration Hotfix */
+#findTimeSlots{transition:opacity .12s ease}

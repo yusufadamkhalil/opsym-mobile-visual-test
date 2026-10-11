@@ -59,7 +59,7 @@ let liveTodayLoaded = false;
 let liveTodayError = null;
 
 
-const OPSYM_UI_VERSION="1.9.4-launch-timezone-findtime";
+const OPSYM_UI_VERSION="1.9.4.1-findtime-duration-hotfix";
 const OPSYM_NATIVE_WRAPPER_VERSION="1.9.0-native.2";
 const opsymDiag={
   uiVersion:OPSYM_UI_VERSION,
@@ -330,6 +330,97 @@ function unscheduledTaskOptions_(){
   return `<option value="">Choose an unscheduled Task</option>`+
     tasks.map(t=>`<option value="${escapeHtml(t.taskId)}">${escapeHtml(t.title||t.taskId)}</option>`).join("");
 }
+
+function bindFindTimeSlotButtons_(){
+  const root=document.getElementById("opsymPlannerBackdrop");
+  if(!root)return;
+  root.querySelectorAll("[data-find-slot-start]").forEach(el=>{
+    if(el.dataset.findSlotBound==="1")return;
+    el.dataset.findSlotBound="1";
+    el.addEventListener("click",()=>{
+      assignFindTimeSlot_(
+        el.dataset.findSlotStart||"",
+        el.dataset.findSlotEnd||"",
+        Number(el.dataset.findSlotDuration)||60
+      );
+    });
+  });
+}
+function refreshFindTimeSlots_(durationMin){
+  const duration=Math.max(15,Math.min(480,Number(durationMin)||60));
+  saveOpsymPreferences_({findTimeDurationMin:duration});
+  const target=document.getElementById("findTimeSlots");
+  if(target)target.innerHTML=findTimeSlotRows_(duration);
+  bindFindTimeSlotButtons_();
+}
+function bindFindTimeSheetControls_(){
+  const root=document.getElementById("opsymPlannerBackdrop");
+  if(!root)return;
+
+  const select=root.querySelector("#findTimeDurationSelect");
+  const customWrap=root.querySelector("#findTimeCustomWrap");
+  const custom=root.querySelector("#findTimeCustomMinutes");
+
+  if(select && select.dataset.bound!=="1"){
+    select.dataset.bound="1";
+    select.addEventListener("change",()=>{
+      if(select.value==="custom"){
+        customWrap?.classList.remove("opsym-hidden");
+        const current=Math.max(15,Math.min(480,Number(opsymPreferences.findTimeDurationMin)||60));
+        if(custom)custom.value=String(current);
+        custom?.focus();
+        return;
+      }
+
+      customWrap?.classList.add("opsym-hidden");
+      refreshFindTimeSlots_(Number(select.value)||60);
+    });
+  }
+
+  if(custom && custom.dataset.bound!=="1"){
+    custom.dataset.bound="1";
+    const applyCustom=()=>{
+      const duration=Math.max(15,Math.min(480,Number(custom.value)||60));
+      custom.value=String(duration);
+      refreshFindTimeSlots_(duration);
+    };
+    custom.addEventListener("change",applyCustom);
+    custom.addEventListener("blur",applyCustom);
+    custom.addEventListener("keydown",e=>{
+      if(e.key==="Enter"){
+        e.preventDefault();
+        applyCustom();
+        custom.blur();
+      }
+    });
+  }
+
+  bindFindTimeSlotButtons_();
+}
+function bindFindTimeAssignmentControls_(){
+  const root=document.getElementById("opsymPlannerBackdrop");
+  if(!root)return;
+
+  root.querySelectorAll("[data-return-findtime]").forEach(el=>{
+    if(el.dataset.bound==="1")return;
+    el.dataset.bound="1";
+    el.addEventListener("click",()=>showFindTime_());
+  });
+
+  root.querySelectorAll("[data-confirm-findtime-slot]").forEach(el=>{
+    if(el.dataset.bound==="1")return;
+    el.dataset.bound="1";
+    el.addEventListener("click",()=>{
+      const taskId=root.querySelector("#findTimeTaskSelect")?.value||"";
+      confirmFindTimeAssignment_(
+        taskId,
+        el.dataset.findSlotStart||"",
+        el.dataset.findSlotEnd||""
+      );
+    });
+  });
+}
+
 async function showFindTime_(){
   await ensurePlanningData_();
   const preferred=Math.max(15,Number(opsymPreferences.findTimeDurationMin)||60);
@@ -353,6 +444,7 @@ async function showFindTime_(){
     <div class="opsym-slot-grid" id="findTimeSlots">${findTimeSlotRows_(preferred)}</div>
     ${unscheduled.length?`<div class="detail-note"><span>Assign a slot</span><p>Tap a time, then choose an unscheduled Task and confirm.</p></div>`:`<div class="detail-note"><span>No unscheduled Tasks</span><p>You can still review available times, but there is currently no unscheduled Task to place.</p></div>`}
   `);
+  requestAnimationFrame(bindFindTimeSheetControls_);
 }
 async function assignFindTimeSlot_(start,end,durationMin){
   const tasks=liveTaskArray_().filter(t=>t.isUnscheduled);
@@ -375,6 +467,7 @@ async function assignFindTimeSlot_(start,end,durationMin){
         <button class="ghost-btn" type="button" data-return-findtime>Back to times</button>
       </div>
     </div>`);
+  requestAnimationFrame(bindFindTimeAssignmentControls_);
 }
 async function confirmFindTimeAssignment_(taskId,start,end){
   const t=liveTaskArray_().find(x=>String(x.taskId)===String(taskId));
@@ -3657,57 +3750,6 @@ function bindDynamic(){
 
 
 
-  const findDuration=document.getElementById("findTimeDurationSelect");
-  if(findDuration && !findDuration.dataset.bound){
-    findDuration.dataset.bound="1";
-    findDuration.addEventListener("change",()=>{
-      const wrap=document.getElementById("findTimeCustomWrap");
-      if(findDuration.value==="custom"){
-        wrap?.classList.remove("opsym-hidden");
-        document.getElementById("findTimeCustomMinutes")?.focus();
-        return;
-      }
-      wrap?.classList.add("opsym-hidden");
-      const duration=Number(findDuration.value)||60;
-      saveOpsymPreferences_({findTimeDurationMin:duration});
-      const target=document.getElementById("findTimeSlots");
-      if(target)target.innerHTML=findTimeSlotRows_(duration);
-      bindDynamic();
-    });
-  }
-  const customDuration=document.getElementById("findTimeCustomMinutes");
-  if(customDuration && !customDuration.dataset.bound){
-    customDuration.dataset.bound="1";
-    const refreshCustom=()=>{
-      const duration=Math.max(15,Math.min(480,Number(customDuration.value)||60));
-      saveOpsymPreferences_({findTimeDurationMin:duration});
-      const target=document.getElementById("findTimeSlots");
-      if(target)target.innerHTML=findTimeSlotRows_(duration);
-      bindDynamic();
-    };
-    customDuration.addEventListener("change",refreshCustom);
-    customDuration.addEventListener("blur",refreshCustom);
-  }
-  document.querySelectorAll("[data-find-slot-start]").forEach(el=>{
-    if(el.dataset.findSlotBound)return;
-    el.dataset.findSlotBound="1";
-    el.addEventListener("click",()=>{
-      assignFindTimeSlot_(el.dataset.findSlotStart||"",el.dataset.findSlotEnd||"",Number(el.dataset.findSlotDuration)||60);
-    });
-  });
-  document.querySelectorAll("[data-return-findtime]").forEach(el=>{
-    if(el.dataset.bound)return;
-    el.dataset.bound="1";
-    el.addEventListener("click",()=>showFindTime_());
-  });
-  document.querySelectorAll("[data-confirm-findtime-slot]").forEach(el=>{
-    if(el.dataset.bound)return;
-    el.dataset.bound="1";
-    el.addEventListener("click",()=>{
-      const taskId=document.getElementById("findTimeTaskSelect")?.value||"";
-      confirmFindTimeAssignment_(taskId,el.dataset.findSlotStart||"",el.dataset.findSlotEnd||"");
-    });
-  });
   document.querySelectorAll("[data-save-region-time]").forEach(el=>{
     if(el.dataset.bound)return;
     el.dataset.bound="1";
@@ -3871,7 +3913,7 @@ document.addEventListener("click",e=>{
 window.addEventListener("popstate",()=>{activeRoute=location.hash.replace("#","")||"home";safeNavigate_(activeRoute,{replace:true});});
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
 
-if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=194",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
+if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1941",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
 pendingSharedCapture=readShareTargetFromUrl();
 if(pendingSharedCapture) applyPendingSharedCapture();
 
