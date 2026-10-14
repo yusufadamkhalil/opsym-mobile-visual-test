@@ -59,7 +59,7 @@ let liveTodayLoaded = false;
 let liveTodayError = null;
 
 
-const OPSYM_UI_VERSION="1.9.4.1-findtime-duration-hotfix";
+const OPSYM_UI_VERSION="2.0-u1-mobile-shared-core-dev";
 const OPSYM_NATIVE_WRAPPER_VERSION="1.9.0-native.2";
 const opsymDiag={
   uiVersion:OPSYM_UI_VERSION,
@@ -620,6 +620,7 @@ const mobileBridge = {
   endpoint: localStorage.getItem("opsym_mobile_bridge_url") || "",
   key: localStorage.getItem("opsym_mobile_bridge_key") || ""
 };
+if(window.OpsymCore) window.OpsymCore.configure(mobileBridge);
 
 function escapeHtml(value){
   return String(value == null ? "" : value)
@@ -654,6 +655,7 @@ function saveMobileBridgeConfig(endpoint,key=""){
   localStorage.setItem("opsym_mobile_bridge_key",secret);
   mobileBridge.endpoint=clean;
   mobileBridge.key=secret;
+  if(window.OpsymCore) window.OpsymCore.configure({endpoint:clean,key:secret});
 }
 
 function clearMobileBridgeConfig(){
@@ -674,33 +676,8 @@ function clearMobileBridgeConfig(){
 }
 
 function jsonpRequest(url,params,timeoutMs=9000,requestLabel="Op-Sym"){
-  return new Promise((resolve,reject)=>{
-    const cb="__opsym_cb_"+Date.now()+"_"+Math.random().toString(36).slice(2);
-    const script=document.createElement("script");
-    let finished=false;
-    const label=String(requestLabel||"Op-Sym").trim();
-    const timer=setTimeout(
-      ()=>finish(new Error(`${label} request timed out after ${Math.round(timeoutMs/1000)} seconds.`)),
-      timeoutMs
-    );
-
-    function finish(err,value){
-      if(finished)return;
-      finished=true;
-      clearTimeout(timer);
-      try{delete window[cb]}catch(_){window[cb]=undefined}
-      script.remove();
-      err?reject(err):resolve(value);
-    }
-
-    window[cb]=payload=>finish(null,payload);
-    const q=new URLSearchParams({...params,callback:cb,_:Date.now().toString()});
-    script.src=url+"?"+q.toString();
-    script.async=true;
-    script.referrerPolicy="no-referrer";
-    script.onerror=()=>finish(new Error(`${label} could not reach the Op-Sym Mobile Bridge.`));
-    document.head.appendChild(script);
-  });
+  if(!window.OpsymCore) return Promise.reject(new Error("Op-Sym Shared Core is not loaded."));
+  return window.OpsymCore.transport.jsonp(url,params,timeoutMs,requestLabel);
 }
 
 
@@ -708,11 +685,9 @@ function jsonpRequest(url,params,timeoutMs=9000,requestLabel="Op-Sym"){
 async function loadLiveHomeData(showFailureToast=false){
   if(!mobileBridge.endpoint) return false;
   try{
-    const params={action:"home"};
-    if(mobileBridge.key) params.key=mobileBridge.key;
-    const payload=await jsonpRequest(mobileBridge.endpoint,params,12000,"Home data");
-    if(!payload || payload.ok!==true) throw new Error(payload?.error || "Invalid Home response.");
-    liveHomeData=payload.data || null;
+    if(!window.OpsymCore) throw new Error("Op-Sym Shared Core is not loaded.");
+    window.OpsymCore.configure(mobileBridge);
+    liveHomeData=await window.OpsymCore.api.home();
     liveHomeLoaded=!!liveHomeData;
     liveHomeLastUpdatedAt=Date.now();
     liveHomeError=null;
@@ -771,11 +746,9 @@ async function loadLiveTodayData(showFailureToast=false){
 async function loadLiveTasksData(showFailureToast=false){
   if(!mobileBridge.endpoint) return false;
   try{
-    const params={action:"tasks"};
-    if(mobileBridge.key) params.key=mobileBridge.key;
-    const payload=await jsonpRequest(mobileBridge.endpoint,params);
-    if(!payload || payload.ok!==true) throw new Error(payload?.error || "Invalid Tasks response.");
-    liveTasksData=payload.data || null;
+    if(!window.OpsymCore) throw new Error("Op-Sym Shared Core is not loaded.");
+    window.OpsymCore.configure(mobileBridge);
+    liveTasksData=await window.OpsymCore.api.tasks();
     liveTasksLoaded=!!liveTasksData;
     liveTasksError=null;
     reconcileLoadedCanonicalTasks_();
@@ -3913,7 +3886,7 @@ document.addEventListener("click",e=>{
 window.addEventListener("popstate",()=>{activeRoute=location.hash.replace("#","")||"home";safeNavigate_(activeRoute,{replace:true});});
 matchMedia("(orientation: landscape)").addEventListener?.("change",()=>safeNavigate_(location.hash.replace("#","")||"home",{replace:true}));
 
-if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=1941",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
+if("serviceWorker" in navigator){window.addEventListener("load",async()=>{try{const reg=await navigator.serviceWorker.register("./service-worker.js?v=20u1",{scope:"/opsym-mobile-visual-test/"});await reg.update();}catch(_){}});}
 pendingSharedCapture=readShareTargetFromUrl();
 if(pendingSharedCapture) applyPendingSharedCapture();
 
